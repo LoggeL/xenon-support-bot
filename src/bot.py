@@ -349,8 +349,12 @@ class XenonSupportBot(commands.Bot):
         thinking_embed = create_thinking_embed([])
         reply = await message.reply(embed=thinking_embed, mention_author=False)
 
-        # Fetch thread context
-        channel_context = await fetch_channel_context(message.channel, limit=15)
+        # Fetch thread context (including bot responses)
+        channel_context = await fetch_channel_context(
+            message.channel,
+            limit=15,
+            bot_user=self.user,
+        )
 
         # Get conversation history for this thread
         history = self.message_history.get(message.channel.id)
@@ -411,16 +415,35 @@ class XenonSupportBot(commands.Bot):
 async def fetch_channel_context(
     channel: discord.TextChannel | discord.Thread | discord.DMChannel,
     limit: int = 10,
+    bot_user: discord.User | discord.ClientUser | None = None,
 ) -> list[dict]:
-    """Fetch recent messages from channel for context."""
+    """Fetch recent messages from channel for context, including bot responses."""
     context: list[dict] = []
 
     try:
         async for msg in channel.history(limit=limit):
-            if msg.content and not msg.author.bot:
+            if not msg.content:
+                continue
+
+            # Include bot's own messages as assistant responses
+            if bot_user and msg.author.id == bot_user.id:
+                # Extract text from embeds if message has no content
+                content = msg.content
+                if not content and msg.embeds:
+                    # Get description from first embed
+                    content = msg.embeds[0].description or ""
+                if content:
+                    context.append({
+                        "author": "Assistant",
+                        "content": content[:500],
+                        "is_bot": True,
+                    })
+            elif not msg.author.bot:
+                # Regular user message
                 context.append({
                     "author": msg.author.display_name,
-                    "content": msg.content[:500],  # Limit message length
+                    "content": msg.content[:500],
+                    "is_bot": False,
                 })
     except discord.Forbidden:
         pass  # Can't read history
@@ -470,7 +493,10 @@ async def support_command(interaction: discord.Interaction, question: str | None
     # Fetch channel context
     channel_context: list[dict] = []
     if interaction.channel and hasattr(interaction.channel, "history"):
-        channel_context = await fetch_channel_context(interaction.channel)  # type: ignore
+        channel_context = await fetch_channel_context(
+            interaction.channel,  # type: ignore
+            bot_user=bot.user,
+        )
 
     # If no question provided, build one from context
     if not question:
