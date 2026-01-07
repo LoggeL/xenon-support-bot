@@ -12,7 +12,6 @@ class Settings(BaseSettings):
 
     # Discord
     discord_token: str
-    discord_channel_id: int
     admin_user_ids: str = ""
 
     # OpenRouter
@@ -38,6 +37,10 @@ class Settings(BaseSettings):
     @property
     def index_dir(self) -> Path:
         return self.data_dir / "index"
+
+    @property
+    def servers_dir(self) -> Path:
+        return self.data_dir / "servers"
 
 
 settings = Settings()

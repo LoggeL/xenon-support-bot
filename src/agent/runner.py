@@ -1,15 +1,26 @@
 """Agentic loop runner - executes tools one at a time with live updates."""
 
 import json
-from dataclasses import dataclass
-from typing import AsyncIterator, Callable, Awaitable
+import re
+from dataclasses import dataclass, field
+from typing import AsyncIterator
 
-from src.agent.client import OpenRouterClient, Message, ToolCall
+from src.agent.client import OpenRouterClient, Message
 from src.agent.tools import TOOLS, execute_tool, get_tool_emoji, get_tool_description
 from src.docs.store import doc_store
 
 
 MAX_TOOL_CALLS = 10  # Prevent infinite loops
+
+
+@dataclass
+class ButtonData:
+    """A button to include in the response."""
+
+    type: str  # "link" or "action"
+    label: str
+    url: str | None = None  # For link buttons
+    action: str | None = None  # For action buttons: "resolved", "ticket"
 
 
 @dataclass
@@ -23,6 +34,7 @@ class AgentStep:
     response: str | None = None
     emoji: str = ""
     description: str = ""
+    buttons: list[ButtonData] = field(default_factory=list)
 
 
 def build_system_prompt() -> str:
@@ -47,7 +59,78 @@ Your job is to answer questions about Xenon based on the official documentation.
 To read a document's content, use the get_doc tool with the slug.
 To search across all docs, use search_docs.
 
-Always cite which documentation page your answer comes from."""
+## Response Format:
+When you have found the answer, respond with a JSON object in this exact format:
+```json
+{{
+  "response": "Your helpful answer here...",
+  "buttons": [
+    {{"type": "link", "label": "📚 Docs Page", "url": "https://wiki.xenon.bot/page-slug"}}
+  ]
+}}
+```
+
+Button guidelines:
+- Only include buttons if they provide genuinely useful links
+- Use the "link" type with relevant documentation URLs
+- Label should be short and descriptive with an emoji
+- Maximum 3 link buttons per response
+- If no buttons are helpful, use an empty array: "buttons": []
+
+The documentation base URL is: https://wiki.xenon.bot/
+
+Always cite which documentation page your answer comes from in the response text."""
+
+
+def parse_response_with_buttons(content: str) -> tuple[str, list[ButtonData]]:
+    """Parse agent response, extracting buttons if present."""
+    buttons: list[ButtonData] = []
+
+    # Try to find JSON in the response
+    # Look for ```json ... ``` blocks first
+    json_match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(1))
+            if isinstance(data, dict) and "response" in data:
+                response_text = data.get("response", "")
+                raw_buttons = data.get("buttons", [])
+                for btn in raw_buttons:
+                    if isinstance(btn, dict) and "type" in btn and "label" in btn:
+                        buttons.append(
+                            ButtonData(
+                                type=btn.get("type", "link"),
+                                label=btn.get("label", ""),
+                                url=btn.get("url"),
+                                action=btn.get("action"),
+                            )
+                        )
+                return response_text, buttons
+        except json.JSONDecodeError:
+            pass
+
+    # Try parsing the whole content as JSON
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict) and "response" in data:
+            response_text = data.get("response", "")
+            raw_buttons = data.get("buttons", [])
+            for btn in raw_buttons:
+                if isinstance(btn, dict) and "type" in btn and "label" in btn:
+                    buttons.append(
+                        ButtonData(
+                            type=btn.get("type", "link"),
+                            label=btn.get("label", ""),
+                            url=btn.get("url"),
+                            action=btn.get("action"),
+                        )
+                    )
+            return response_text, buttons
+    except json.JSONDecodeError:
+        pass
+
+    # No valid JSON found, return content as-is
+    return content, buttons
 
 
 class AgentRunner:
@@ -61,6 +144,7 @@ class AgentRunner:
         user_message: str,
         history: list[dict] | None = None,
         images: list[str] | None = None,
+        channel_context: list[dict] | None = None,
     ) -> AsyncIterator[AgentStep]:
         """
         Run the agent on a user message.
@@ -71,6 +155,7 @@ class AgentRunner:
             user_message: The user's question
             history: Previous messages [{"role": "user"|"assistant", "content": "..."}]
             images: List of base64-encoded images
+            channel_context: Recent channel messages for context [{"author": "...", "content": "..."}]
         """
         # Build messages
         messages: list[Message] = [Message(role="system", content=build_system_prompt())]
@@ -80,11 +165,23 @@ class AgentRunner:
             for msg in history[-5:]:
                 messages.append(Message(role=msg["role"], content=msg["content"]))
 
+        # Build user message with channel context
+        user_content = user_message
+        if channel_context:
+            context_text = "\n".join(
+                f"[{msg['author']}]: {msg['content']}" for msg in channel_context[-10:]
+            )
+            user_content = f"""## Recent channel messages for context:
+{context_text}
+
+## User's question:
+{user_message}"""
+
         # Add current user message
         messages.append(
             Message(
                 role="user",
-                content=user_message,
+                content=user_content,
                 images=images or [],
             )
         )
@@ -147,18 +244,21 @@ class AgentRunner:
 
             else:
                 # No tool calls - we have a final response
-                final_response = response.content or ""
+                final_content = response.content or ""
 
                 # Check if model decided it's irrelevant
-                if "IRRELEVANT" in final_response.upper():
+                if "IRRELEVANT" in final_content.upper():
                     yield AgentStep(
                         type="irrelevant",
-                        response=final_response,
+                        response=final_content,
                     )
                 else:
+                    # Parse response for buttons
+                    response_text, buttons = parse_response_with_buttons(final_content)
                     yield AgentStep(
                         type="response",
-                        response=final_response,
+                        response=response_text,
+                        buttons=buttons,
                     )
                 return
 

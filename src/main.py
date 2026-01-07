@@ -11,7 +11,6 @@ def main():
     """Run the bot."""
     print("Starting Xenon Support Bot...")
     print(f"Model: {settings.openrouter_model}")
-    print(f"Channel ID: {settings.discord_channel_id}")
 
     try:
         bot.run(settings.discord_token)
