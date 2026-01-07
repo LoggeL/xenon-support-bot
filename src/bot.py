@@ -308,6 +308,105 @@ class XenonSupportBot(commands.Bot):
         if not doc_store.is_initialized():
             print("⚠️  Documentation not scraped yet. Run /scrape command.")
 
+    async def on_message(self, message: discord.Message):
+        """Handle messages in support ticket threads."""
+        # Ignore own messages
+        if message.author == self.user:
+            return
+
+        # Ignore bots
+        if message.author.bot:
+            return
+
+        # Only respond in threads that start with "Support:"
+        if not isinstance(message.channel, discord.Thread):
+            return
+
+        if not message.channel.name.startswith("Support:"):
+            return
+
+        # Check if docs are initialized
+        if not doc_store.is_initialized():
+            return
+
+        # Check rate limit
+        if not self.rate_limiter.is_allowed(message.author.id):
+            wait_time = self.rate_limiter.time_until_allowed(message.author.id)
+            await message.reply(
+                embed=discord.Embed(
+                    description=f"⏱️ Rate limited. Please wait {wait_time:.0f} seconds.",
+                    color=discord.Color.red(),
+                ),
+                mention_author=False,
+            )
+            return
+
+        content = message.content.strip()
+        if not content:
+            return
+
+        # Send thinking message
+        thinking_embed = create_thinking_embed([])
+        reply = await message.reply(embed=thinking_embed, mention_author=False)
+
+        # Fetch thread context
+        channel_context = await fetch_channel_context(message.channel, limit=15)
+
+        # Get conversation history for this thread
+        history = self.message_history.get(message.channel.id)
+
+        # Run agent
+        steps: list[AgentStep] = []
+        final_response: str | None = None
+        is_irrelevant = False
+
+        try:
+            async for step in self.agent_runner.run(
+                user_message=content,
+                history=history,
+                channel_context=channel_context,
+            ):
+                steps.append(step)
+
+                if step.type == "tool_call":
+                    thinking_embed = create_thinking_embed(steps)
+                    await reply.edit(embed=thinking_embed)
+
+                elif step.type == "irrelevant":
+                    is_irrelevant = True
+                    break
+
+                elif step.type == "response":
+                    final_response = step.response
+
+        except Exception as e:
+            print(f"Agent error in thread: {e}")
+            error_embed = discord.Embed(
+                description="❌ Sorry, I encountered an error processing your request.",
+                color=discord.Color.red(),
+            )
+            await reply.edit(embed=error_embed)
+            return
+
+        if is_irrelevant:
+            await reply.delete()
+            return
+
+        if final_response:
+            # Add to history
+            self.message_history.add(message.channel.id, "user", content)
+            self.message_history.add(message.channel.id, "assistant", final_response)
+
+            # Create response embed (no buttons in thread replies)
+            response_embed = create_response_embed(
+                final_response,
+                steps,
+                color=discord.Color.green(),
+            )
+            await reply.edit(embed=response_embed)
+        else:
+            await reply.delete()
+
 
 async def fetch_channel_context(
     channel: discord.TextChannel | discord.Thread | discord.DMChannel,
@@ -333,8 +432,8 @@ async def fetch_channel_context(
 
 # Slash commands
 @app_commands.command(name="support", description="Ask a question about Xenon")
-@app_commands.describe(question="Your question about Xenon bot")
-async def support_command(interaction: discord.Interaction, question: str):
+@app_commands.describe(question="Your question about Xenon bot (optional - uses channel context if not provided)")
+async def support_command(interaction: discord.Interaction, question: str | None = None):
     """Handle support questions."""
     bot: XenonSupportBot = interaction.client  # type: ignore
 
@@ -372,6 +471,19 @@ async def support_command(interaction: discord.Interaction, question: str):
     channel_context: list[dict] = []
     if interaction.channel and hasattr(interaction.channel, "history"):
         channel_context = await fetch_channel_context(interaction.channel)  # type: ignore
+
+    # If no question provided, build one from context
+    if not question:
+        if not channel_context:
+            await interaction.edit_original_response(
+                embed=discord.Embed(
+                    description="❌ No question provided and no recent messages to analyze. Please provide a question.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+        # Use the last few messages as the question context
+        question = "Based on the recent conversation above, please help answer any Xenon-related questions."
 
     # Get conversation history
     channel_id = interaction.channel_id or 0
