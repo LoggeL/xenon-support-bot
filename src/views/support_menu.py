@@ -1,0 +1,162 @@
+"""Support menu views: persistent menu, question modal, response buttons."""
+
+from typing import TYPE_CHECKING, Callable, Awaitable
+
+import discord
+
+if TYPE_CHECKING:
+    from src.bot import XenonSupportBot
+
+
+class SupportQuestionModal(discord.ui.Modal):
+    """Modal for entering a support question."""
+
+    question = discord.ui.TextInput(
+        label="Your Question",
+        style=discord.TextStyle.paragraph,
+        placeholder="e.g. How do I create a backup of my server?",
+        max_length=1000,
+        required=True,
+    )
+
+    def __init__(
+        self,
+        *,
+        on_submit: Callable[[discord.Interaction, str], Awaitable[None]],
+    ):
+        super().__init__(title="Ask a Question")
+        self.on_submit_callback = on_submit
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Handle modal submission."""
+        await self.on_submit_callback(interaction, self.question.value)
+
+
+class SupportMenuView(discord.ui.View):
+    """Persistent menu view with 'Ask a Question' button."""
+
+    def __init__(
+        self,
+        *,
+        on_question: Callable[[discord.Interaction, str], Awaitable[None]],
+    ):
+        super().__init__(timeout=None)  # Persistent view
+        self.on_question = on_question
+
+    @discord.ui.button(
+        label="Ask a Question",
+        style=discord.ButtonStyle.primary,
+        emoji="❓",
+        custom_id="support_menu:ask_question",
+    )
+    async def ask_question_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        """Open the question modal."""
+        modal = SupportQuestionModal(on_submit=self.on_question)
+        await interaction.response.send_modal(modal)
+
+
+class SupportResponseView(discord.ui.View):
+    """Response view with Resolved and Community Support buttons."""
+
+    def __init__(
+        self,
+        *,
+        question_id: int,
+        community_channel_id: int | None = None,
+        on_resolved: Callable[[int], Awaitable[None]],
+        on_community_support: Callable[[int], Awaitable[None]],
+    ):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.question_id = question_id
+        self.community_channel_id = community_channel_id
+        self.on_resolved = on_resolved
+        self.on_community_support = on_community_support
+
+    @discord.ui.button(
+        label="Resolved",
+        style=discord.ButtonStyle.success,
+        emoji="✅",
+    )
+    async def resolved_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        """Mark question as resolved."""
+        await self.on_resolved(self.question_id)
+
+        # Disable all buttons
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+        # Update message
+        embed = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
+        if embed:
+            embed.set_footer(text=f"✅ Marked as resolved by {interaction.user.display_name}")
+
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    @discord.ui.button(
+        label="Community Support",
+        style=discord.ButtonStyle.secondary,
+        emoji="💬",
+    )
+    async def community_support_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        """Link to community support channel."""
+        await self.on_community_support(self.question_id)
+
+        # Disable all buttons
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+        # Update message with footer
+        embed = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
+        if embed:
+            embed.set_footer(text="💬 Redirected to community support")
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        # Send link to community channel
+        if self.community_channel_id and interaction.guild:
+            channel = interaction.guild.get_channel(self.community_channel_id)
+            if channel:
+                await interaction.followup.send(
+                    f"Please ask your question in {channel.mention} for community help!",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "Community support channel not found. Please contact a moderator.",
+                    ephemeral=True,
+                )
+        else:
+            await interaction.followup.send(
+                "No community support channel configured. Please contact a moderator.",
+                ephemeral=True,
+            )
+
+        self.stop()
+
+
+def create_menu_embed() -> discord.Embed:
+    """Create the support menu embed."""
+    return discord.Embed(
+        title="🤖 Xenon Support",
+        description=(
+            "Have a question about Xenon?\n\n"
+            "Click the button below and our AI will try to help "
+            "based on the official documentation."
+        ),
+        color=discord.Color.blue(),
+    )
