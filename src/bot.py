@@ -1,12 +1,13 @@
 """Discord bot with menu-based support system and analytics."""
 
+import random
 import time
 from collections import defaultdict
 from datetime import datetime
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from src.config import settings
 from src.server_config import server_config
@@ -159,12 +160,46 @@ class XenonSupportBot(commands.Bot):
         if not doc_store.is_initialized():
             print("⚠️  Documentation not scraped yet. Run /scrape command.")
 
-        # Set bot status
-        activity = discord.Activity(
-            type=discord.ActivityType.watching,
-            name="for your questions | /about",
-        )
+        # Start status rotation
+        self.rotate_status.start()
+
+    @tasks.loop(minutes=10)
+    async def rotate_status(self):
+        """Rotate bot status every 10 minutes."""
+        statuses = [
+            # Normal statuses
+            (discord.ActivityType.watching, "for your questions"),
+            (discord.ActivityType.listening, "Xenon support requests"),
+            (discord.ActivityType.watching, "the docs so you don't have to"),
+            (discord.ActivityType.playing, "with the Xenon API"),
+            (discord.ActivityType.watching, f"{len(self.guilds)} servers"),
+            (discord.ActivityType.listening, "/about for info"),
+            (discord.ActivityType.watching, "backups being created"),
+            (discord.ActivityType.playing, "template librarian"),
+            (discord.ActivityType.listening, "your server needs"),
+            (discord.ActivityType.watching, "templates being synced"),
+            # Fun statuses
+            (discord.ActivityType.playing, "with server backups"),
+            (discord.ActivityType.watching, "Discord grow"),
+            (discord.ActivityType.listening, "the sound of data"),
+            (discord.ActivityType.playing, "backup roulette"),
+            # Easter eggs
+            (discord.ActivityType.playing, "sudo rm -rf / (jk)"),
+            (discord.ActivityType.watching, "you read this"),
+            (discord.ActivityType.listening, "never gonna give you up"),
+            (discord.ActivityType.playing, "in 4K resolution"),
+            (discord.ActivityType.watching, "the mass of backup data"),
+            (discord.ActivityType.playing, "hide and seek with bugs"),
+        ]
+
+        activity_type, name = random.choice(statuses)
+        activity = discord.Activity(type=activity_type, name=name)
         await self.change_presence(activity=activity, status=discord.Status.online)
+
+    @rotate_status.before_loop
+    async def before_rotate_status(self):
+        """Wait until bot is ready before starting rotation."""
+        await self.wait_until_ready()
 
     async def rephrase_for_community(self, question: str) -> str:
         """Rephrase a question to be clearer for community support."""
@@ -650,7 +685,7 @@ async def stats_command(interaction: discord.Interaction):
     # Footer
     embed.set_footer(text="Powered by Xenon Support Bot • Made with ❤️")
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @app_commands.command(
