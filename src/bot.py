@@ -159,6 +159,33 @@ class XenonSupportBot(commands.Bot):
         if not doc_store.is_initialized():
             print("⚠️  Documentation not scraped yet. Run /scrape command.")
 
+    async def rephrase_for_community(self, question: str) -> str:
+        """Rephrase a question to be clearer for community support."""
+        from src.agent.client import Message
+
+        messages = [
+            Message(
+                role="system",
+                content=(
+                    "You are a helpful assistant. Rephrase the user's question to be clearer "
+                    "and more concise for community support volunteers to understand. "
+                    "Keep the core problem but make it easier to read. "
+                    "Output ONLY the rephrased question, nothing else. "
+                    "Keep it under 200 characters if possible."
+                ),
+            ),
+            Message(role="user", content=question),
+        ]
+
+        try:
+            response = await self.openrouter_client.chat(messages)
+            if response.content:
+                return response.content.strip()
+        except Exception:
+            pass
+
+        return question  # Fall back to original
+
     async def handle_question(
         self,
         interaction: discord.Interaction,
@@ -254,12 +281,19 @@ class XenonSupportBot(commands.Bot):
                 color=discord.Color.green(),
             )
 
+            # Rephrase callback for community support
+            async def rephrase_question(q: str) -> str:
+                return await self.rephrase_for_community(q)
+
             # Add link buttons from agent response
             view = SupportResponseView(
                 question_id=question_id,
+                original_question=question,
+                bot_response=final_response,
                 community_channel_id=srv_settings.community_support_channel_id,
                 on_resolved=analytics.mark_answered,
                 on_community_support=analytics.mark_community_support,
+                on_rephrase=rephrase_question,
             )
 
             # Add link buttons from agent
@@ -677,10 +711,16 @@ async def about_command(interaction: discord.Interaction):
         inline=False,
     )
 
-    # Footer with version
+    # Footer with version and branding
     embed.set_footer(
-        text=f"Xenon Support Bot v1.0 • Serving {len(bot.guilds)} servers",
+        text=f"Xenon Support Bot v1.0 • Serving {len(bot.guilds)} servers • Made by LMF",
         icon_url=bot.user.display_avatar.url if bot.user else None,
+    )
+
+    # Author with LMF branding
+    embed.set_author(
+        name="Made by LMF",
+        url="https://lmf.logge.top/",
     )
 
     await interaction.response.send_message(embed=embed)

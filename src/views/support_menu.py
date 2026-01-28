@@ -66,15 +66,21 @@ class SupportResponseView(discord.ui.View):
         self,
         *,
         question_id: int,
+        original_question: str,
+        bot_response: str,
         community_channel_id: int | None = None,
         on_resolved: Callable[[int], Awaitable[None]],
         on_community_support: Callable[[int], Awaitable[None]],
+        on_rephrase: Callable[[str], Awaitable[str]] | None = None,
     ):
         super().__init__(timeout=300)  # 5 minute timeout
         self.question_id = question_id
+        self.original_question = original_question
+        self.bot_response = bot_response
         self.community_channel_id = community_channel_id
         self.on_resolved = on_resolved
         self.on_community_support = on_community_support
+        self.on_rephrase = on_rephrase
 
     @discord.ui.button(
         label="Resolved",
@@ -112,7 +118,7 @@ class SupportResponseView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        """Link to community support channel."""
+        """Post question to community support channel."""
         await self.on_community_support(self.question_id)
 
         # Disable all buttons
@@ -127,14 +133,48 @@ class SupportResponseView(discord.ui.View):
 
         await interaction.response.edit_message(embed=embed, view=self)
 
-        # Send link to community channel
+        # Post to community channel
         if self.community_channel_id and interaction.guild:
             channel = interaction.guild.get_channel(self.community_channel_id)
-            if channel:
-                await interaction.followup.send(
-                    f"Please ask your question in {channel.mention} for community help!",
-                    ephemeral=True,
+            if channel and isinstance(channel, discord.TextChannel):
+                # Rephrase the question if callback provided
+                rephrased = self.original_question
+                if self.on_rephrase:
+                    try:
+                        rephrased = await self.on_rephrase(self.original_question)
+                    except Exception:
+                        pass  # Fall back to original
+
+                # Create help request embed
+                help_embed = discord.Embed(
+                    title="💬 Community Help Needed",
+                    description=rephrased,
+                    color=discord.Color.orange(),
                 )
+                help_embed.add_field(
+                    name="👤 Asked by",
+                    value=interaction.user.mention,
+                    inline=True,
+                )
+                help_embed.add_field(
+                    name="🤖 Bot couldn't help",
+                    value="The AI support bot wasn't able to fully answer this question.",
+                    inline=True,
+                )
+                help_embed.set_footer(text="Please help if you can!")
+
+                try:
+                    await channel.send(embed=help_embed)
+                    await interaction.followup.send(
+                        f"✅ Your question has been posted in {channel.mention}. "
+                        "Someone from the community will help you soon!",
+                        ephemeral=True,
+                    )
+                except discord.Forbidden:
+                    await interaction.followup.send(
+                        "❌ Couldn't post to the community channel. Please ask there manually.",
+                        ephemeral=True,
+                    )
             else:
                 await interaction.followup.send(
                     "Community support channel not found. Please contact a moderator.",
