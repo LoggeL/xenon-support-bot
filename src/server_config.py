@@ -16,6 +16,9 @@ class ServerSettings:
     support_role_id: int | None = None
     ticket_channel_id: int | None = None
     ephemeral_processing: bool = False  # Default to public processing messages
+    support_channel_id: int | None = None
+    menu_message_id: int | None = None
+    community_support_channel_id: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -27,6 +30,9 @@ class ServerSettings:
             support_role_id=data.get("support_role_id"),
             ticket_channel_id=data.get("ticket_channel_id"),
             ephemeral_processing=data.get("ephemeral_processing", False),
+            support_channel_id=data.get("support_channel_id"),
+            menu_message_id=data.get("menu_message_id"),
+            community_support_channel_id=data.get("community_support_channel_id"),
         )
 
 
