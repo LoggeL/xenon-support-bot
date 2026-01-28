@@ -3,7 +3,7 @@
 import json
 import re
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable, Awaitable
 
 from src.agent.client import OpenRouterClient, Message
 from src.agent.tools import TOOLS, execute_tool, get_tool_emoji, get_tool_description
@@ -145,6 +145,7 @@ class AgentRunner:
         history: list[dict] | None = None,
         images: list[str] | None = None,
         channel_context: list[dict] | None = None,
+        on_tool_call: Callable[[str, dict, dict], Awaitable[None]] | None = None,
     ) -> AsyncIterator[AgentStep]:
         """
         Run the agent on a user message.
@@ -208,6 +209,10 @@ class AgentRunner:
 
                 # Execute the tool
                 result = execute_tool(tool_call.name, tool_call.arguments)
+
+                # Call the callback if provided
+                if on_tool_call:
+                    await on_tool_call(tool_call.name, tool_call.arguments, result)
 
                 # Check for relevance gate
                 if tool_call.name == "check_relevance":
