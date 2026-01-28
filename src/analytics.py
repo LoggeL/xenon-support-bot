@@ -206,6 +206,57 @@ class Analytics:
                 "days": days,
             }
 
+    async def get_global_stats(self) -> dict[str, Any]:
+        """Get global analytics stats across all guilds."""
+        await self.init()
+        async with aiosqlite.connect(self.db_path) as db:
+            # Total questions all time
+            cursor = await db.execute("SELECT COUNT(*) FROM questions")
+            total_questions = (await cursor.fetchone())[0]
+
+            # Answered questions all time
+            cursor = await db.execute("SELECT COUNT(*) FROM questions WHERE answered = 1")
+            total_answered = (await cursor.fetchone())[0]
+
+            # Total tool calls
+            cursor = await db.execute("SELECT COUNT(*) FROM tool_calls")
+            total_tool_calls = (await cursor.fetchone())[0]
+
+            # Unique users
+            cursor = await db.execute("SELECT COUNT(DISTINCT user_id) FROM questions")
+            unique_users = (await cursor.fetchone())[0]
+
+            # Unique guilds
+            cursor = await db.execute("SELECT COUNT(DISTINCT guild_id) FROM questions")
+            unique_guilds = (await cursor.fetchone())[0]
+
+            # Questions today
+            today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM questions WHERE created_at >= ?",
+                (today.isoformat(),)
+            )
+            questions_today = (await cursor.fetchone())[0]
+
+            # Questions this week
+            week_ago = datetime.utcnow() - timedelta(days=7)
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM questions WHERE created_at >= ?",
+                (week_ago.isoformat(),)
+            )
+            questions_week = (await cursor.fetchone())[0]
+
+            return {
+                "total_questions": total_questions,
+                "total_answered": total_answered,
+                "total_tool_calls": total_tool_calls,
+                "unique_users": unique_users,
+                "unique_guilds": unique_guilds,
+                "questions_today": questions_today,
+                "questions_week": questions_week,
+                "answer_rate": (total_answered / total_questions * 100) if total_questions > 0 else 0,
+            }
+
 
 # Global instance
 analytics = Analytics()

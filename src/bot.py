@@ -2,6 +2,7 @@
 
 import time
 from collections import defaultdict
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -133,6 +134,7 @@ class XenonSupportBot(commands.Bot):
         self.rate_limiter = RateLimiter(settings.rate_limit_per_minute)
         self.openrouter_client = OpenRouterClient()
         self.agent_runner = AgentRunner(self.openrouter_client)
+        self.start_time = datetime.utcnow()
 
     async def setup_hook(self):
         """Set up slash commands and persistent views."""
@@ -145,6 +147,8 @@ class XenonSupportBot(commands.Bot):
         self.tree.add_command(support_unanswered_command)
         self.tree.add_command(support_config_group)
         self.tree.add_command(scrape_command)
+        self.tree.add_command(stats_command)
+        self.tree.add_command(about_command)
         await self.tree.sync()
 
     async def on_ready(self):
@@ -510,6 +514,176 @@ async def support_unanswered_command(
         )
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+def format_uptime(delta) -> str:
+    """Format a timedelta as a human-readable string."""
+    days = delta.days
+    hours, remainder = divmod(delta.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    if seconds > 0 or not parts:
+        parts.append(f"{seconds}s")
+
+    return " ".join(parts)
+
+
+@app_commands.command(
+    name="stats",
+    description="View bot statistics",
+)
+async def stats_command(interaction: discord.Interaction):
+    """Show bot statistics."""
+    bot: XenonSupportBot = interaction.client  # type: ignore
+
+    # Get global analytics stats
+    stats = await analytics.get_global_stats()
+
+    # Calculate uptime
+    uptime = datetime.utcnow() - bot.start_time
+    uptime_str = format_uptime(uptime)
+
+    # Get bot info
+    guild_count = len(bot.guilds)
+    user_count = sum(g.member_count or 0 for g in bot.guilds)
+
+    # Create embed
+    embed = discord.Embed(
+        title="📊 Xenon Support Bot Stats",
+        color=discord.Color.blue(),
+    )
+
+    # Bot stats
+    embed.add_field(
+        name="🤖 Bot",
+        value=f"```\n"
+              f"Servers:  {guild_count:,}\n"
+              f"Users:    {user_count:,}\n"
+              f"Uptime:   {uptime_str}\n"
+              f"```",
+        inline=True,
+    )
+
+    # Questions stats
+    answer_rate = stats["answer_rate"]
+    rate_bar = "█" * int(answer_rate / 10) + "░" * (10 - int(answer_rate / 10))
+    embed.add_field(
+        name="❓ Questions",
+        value=f"```\n"
+              f"Total:    {stats['total_questions']:,}\n"
+              f"Today:    {stats['questions_today']:,}\n"
+              f"Week:     {stats['questions_week']:,}\n"
+              f"```",
+        inline=True,
+    )
+
+    # Performance stats
+    embed.add_field(
+        name="✅ Performance",
+        value=f"```\n"
+              f"Answered: {stats['total_answered']:,}\n"
+              f"Rate:     {answer_rate:.1f}%\n"
+              f"[{rate_bar}]\n"
+              f"```",
+        inline=True,
+    )
+
+    # Usage stats
+    embed.add_field(
+        name="👥 Usage",
+        value=f"```\n"
+              f"Unique Users:   {stats['unique_users']:,}\n"
+              f"Active Servers: {stats['unique_guilds']:,}\n"
+              f"Tool Calls:     {stats['total_tool_calls']:,}\n"
+              f"```",
+        inline=False,
+    )
+
+    # Footer
+    embed.set_footer(text="Powered by Xenon Support Bot • Made with ❤️")
+
+    await interaction.response.send_message(embed=embed)
+
+
+@app_commands.command(
+    name="about",
+    description="Learn about the Xenon Support Bot",
+)
+async def about_command(interaction: discord.Interaction):
+    """Show information about the bot."""
+    bot: XenonSupportBot = interaction.client  # type: ignore
+
+    embed = discord.Embed(
+        title="🤖 About Xenon Support Bot",
+        description=(
+            "An AI-powered support assistant for [Xenon](https://xenon.bot), "
+            "the Discord backup & template bot.\n\n"
+            "I use **agentic RAG** (Retrieval-Augmented Generation) to answer "
+            "your questions based on the official Xenon documentation."
+        ),
+        color=discord.Color.blue(),
+    )
+
+    # Features
+    embed.add_field(
+        name="✨ Features",
+        value=(
+            "• AI-powered answers from official docs\n"
+            "• Real-time document search\n"
+            "• Analytics tracking\n"
+            "• Community support fallback"
+        ),
+        inline=True,
+    )
+
+    # Commands
+    embed.add_field(
+        name="📜 Commands",
+        value=(
+            "`/stats` - View bot statistics\n"
+            "`/about` - This message\n"
+            "`/support-config show` - Server settings"
+        ),
+        inline=True,
+    )
+
+    # Admin commands
+    embed.add_field(
+        name="🔧 Admin Commands",
+        value=(
+            "`/setup-support-menu` - Create menu\n"
+            "`/support-analytics` - View analytics\n"
+            "`/support-unanswered` - Unanswered Q's\n"
+            "`/scrape` - Update docs"
+        ),
+        inline=True,
+    )
+
+    # Links
+    embed.add_field(
+        name="🔗 Links",
+        value=(
+            "[Xenon Bot](https://xenon.bot) • "
+            "[Documentation](https://wiki.xenon.bot) • "
+            "[Support Server](https://xenon.bot/discord)"
+        ),
+        inline=False,
+    )
+
+    # Footer with version
+    embed.set_footer(
+        text=f"Xenon Support Bot v1.0 • Serving {len(bot.guilds)} servers",
+        icon_url=bot.user.display_avatar.url if bot.user else None,
+    )
+
+    await interaction.response.send_message(embed=embed)
 
 
 # Create bot instance
