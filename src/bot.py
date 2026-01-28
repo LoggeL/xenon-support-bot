@@ -159,6 +159,13 @@ class XenonSupportBot(commands.Bot):
         if not doc_store.is_initialized():
             print("⚠️  Documentation not scraped yet. Run /scrape command.")
 
+        # Set bot status
+        activity = discord.Activity(
+            type=discord.ActivityType.watching,
+            name="for your questions | /about",
+        )
+        await self.change_presence(activity=activity, status=discord.Status.online)
+
     async def rephrase_for_community(self, question: str) -> str:
         """Rephrase a question to be clearer for community support."""
         from src.agent.client import Message
