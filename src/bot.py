@@ -682,8 +682,8 @@ async def stats_command(interaction: discord.Interaction):
         inline=False,
     )
 
-    # Footer
-    embed.set_footer(text="Powered by Xenon Support Bot • Made with ❤️")
+    # Footer with LMF branding
+    embed.set_footer(text="Xenon Support Bot • Made by LMF • lmf.logge.top")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -744,7 +744,7 @@ async def about_command(interaction: discord.Interaction):
 
     # Links
     embed.add_field(
-        name="🔗 Links",
+        name="🔗 Xenon Links",
         value=(
             "[Xenon Bot](https://xenon.bot) • "
             "[Documentation](https://wiki.xenon.bot) • "
@@ -753,15 +753,25 @@ async def about_command(interaction: discord.Interaction):
         inline=False,
     )
 
-    # Footer with version and branding
+    # Developer branding
+    embed.add_field(
+        name="👨‍💻 Developer",
+        value=(
+            "Created by **LMF** • [Portfolio](https://lmf.logge.top/)\n"
+            "A Modern Frontier of Innovation"
+        ),
+        inline=False,
+    )
+
+    # Footer with version
     embed.set_footer(
-        text=f"Xenon Support Bot v1.0 • Serving {len(bot.guilds)} servers • Made by LMF",
+        text=f"Xenon Support Bot v1.0 • Serving {len(bot.guilds)} servers",
         icon_url=bot.user.display_avatar.url if bot.user else None,
     )
 
     # Author with LMF branding
     embed.set_author(
-        name="Made by LMF",
+        name="LMF",
         url="https://lmf.logge.top/",
     )
 

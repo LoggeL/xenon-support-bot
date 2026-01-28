@@ -191,7 +191,7 @@ class SupportResponseView(discord.ui.View):
 
 def create_menu_embed() -> discord.Embed:
     """Create the support menu embed."""
-    return discord.Embed(
+    embed = discord.Embed(
         title="🤖 Xenon Support",
         description=(
             "Have a question about Xenon?\n\n"
@@ -200,3 +200,5 @@ def create_menu_embed() -> discord.Embed:
         ),
         color=discord.Color.blue(),
     )
+    embed.set_footer(text="Powered by LMF • lmf.logge.top")
+    return embed
