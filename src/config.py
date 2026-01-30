@@ -12,7 +12,8 @@ class Settings(BaseSettings):
 
     # Discord
     discord_token: str
-    admin_user_ids: str = ""
+    owner_user_id: int  # Bot owner - can manage admins
+    admin_user_ids: str = ""  # Deprecated - use /admin commands instead
 
     # OpenRouter
     openrouter_api_key: str

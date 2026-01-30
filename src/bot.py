@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 
 from src.config import settings
 from src.server_config import server_config
+from src.admin_store import admin_store
 from src.agent.runner import AgentRunner, AgentStep, ButtonData
 from src.agent.client import OpenRouterClient
 from src.docs.scraper import scrape_all_docs
@@ -147,6 +148,7 @@ class XenonSupportBot(commands.Bot):
         self.tree.add_command(support_analytics_command)
         self.tree.add_command(support_unanswered_command)
         self.tree.add_command(support_config_group)
+        self.tree.add_command(admin_group)
         self.tree.add_command(scrape_command)
         self.tree.add_command(stats_command)
         self.tree.add_command(about_command)
@@ -154,7 +156,8 @@ class XenonSupportBot(commands.Bot):
 
     async def on_ready(self):
         print(f"Logged in as {self.user}")
-        print(f"Admin users: {settings.admin_ids}")
+        print(f"Owner: {settings.owner_user_id}")
+        print(f"Admins: {admin_store.get_all()}")
         print("Bot is ready! Use /setup-support-menu to create a support channel.")
 
         if not doc_store.is_initialized():
@@ -243,23 +246,43 @@ class XenonSupportBot(commands.Bot):
             )
             return
 
-        # Check if docs are initialized
+        # Auto-scrape if docs aren't initialized
         if not doc_store.is_initialized():
             await interaction.response.send_message(
-                "📚 Documentation not loaded yet. An admin needs to run `/scrape` first.",
+                embed=discord.Embed(
+                    description="📚 Documentation not loaded yet. Auto-scraping...",
+                    color=discord.Color.orange(),
+                ),
                 ephemeral=True,
             )
-            return
+
+            try:
+                docs = await scrape_all_docs()
+                doc_search.rebuild_index()
+                await interaction.edit_original_response(
+                    embed=discord.Embed(
+                        description=f"✅ Scraped {len(docs)} documentation pages. Processing your question...",
+                        color=discord.Color.green(),
+                    )
+                )
+            except Exception as e:
+                await interaction.edit_original_response(
+                    embed=discord.Embed(
+                        description=f"❌ Auto-scrape failed: {e}. Please ask an admin to run `/scrape`.",
+                        color=discord.Color.red(),
+                    )
+                )
+                return
+        else:
+            # Send initial processing message (ephemeral)
+            await interaction.response.send_message(
+                embed=create_thinking_embed([]),
+                ephemeral=True,
+            )
 
         # Get server settings
         guild_id = interaction.guild_id or 0
         srv_settings = server_config.get(guild_id)
-
-        # Send initial processing message (ephemeral)
-        await interaction.response.send_message(
-            embed=create_thinking_embed([]),
-            ephemeral=True,
-        )
 
         # Log question to analytics
         question_id = await analytics.log_question(
@@ -416,10 +439,101 @@ async def config_show(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# Admin command group (owner-only)
+admin_group = app_commands.Group(
+    name="admin",
+    description="Manage bot administrators (owner only)",
+)
+
+
+@admin_group.command(name="add", description="Promote a user to admin")
+@app_commands.describe(user="The user to promote to admin")
+async def admin_add(interaction: discord.Interaction, user: discord.User):
+    """Add a user as admin."""
+    if not admin_store.is_owner(interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Only the bot owner can manage admins.",
+            ephemeral=True,
+        )
+        return
+
+    if admin_store.add_admin(user.id):
+        await interaction.response.send_message(
+            f"✅ {user.mention} is now an admin.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ {user.mention} is already an admin.",
+            ephemeral=True,
+        )
+
+
+@admin_group.command(name="remove", description="Demote an admin")
+@app_commands.describe(user="The admin to demote")
+async def admin_remove(interaction: discord.Interaction, user: discord.User):
+    """Remove admin status from a user."""
+    if not admin_store.is_owner(interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Only the bot owner can manage admins.",
+            ephemeral=True,
+        )
+        return
+
+    if user.id == settings.owner_user_id:
+        await interaction.response.send_message(
+            "❌ Cannot remove the owner from admins.",
+            ephemeral=True,
+        )
+        return
+
+    if admin_store.remove_admin(user.id):
+        await interaction.response.send_message(
+            f"✅ {user.mention} is no longer an admin.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ {user.mention} is not an admin.",
+            ephemeral=True,
+        )
+
+
+@admin_group.command(name="list", description="List all current admins")
+async def admin_list(interaction: discord.Interaction):
+    """List all admins."""
+    if not admin_store.is_owner(interaction.user.id):
+        await interaction.response.send_message(
+            "❌ Only the bot owner can manage admins.",
+            ephemeral=True,
+        )
+        return
+
+    admins = admin_store.get_all()
+    owner_id = settings.owner_user_id
+
+    lines = []
+    for admin_id in sorted(admins):
+        if admin_id == owner_id:
+            lines.append(f"<@{admin_id}> (owner)")
+        else:
+            lines.append(f"<@{admin_id}>")
+
+    embed = discord.Embed(
+        title="🔐 Bot Administrators",
+        description="\n".join(lines) if lines else "No admins configured.",
+        color=discord.Color.blue(),
+    )
+    embed.set_footer(text=f"Total: {len(admins)} admin(s)")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @app_commands.command(name="scrape", description="Scrape Xenon documentation (admin only)")
 async def scrape_command(interaction: discord.Interaction):
     """Scrape documentation command."""
-    if interaction.user.id not in settings.admin_ids:
+    member = interaction.user if isinstance(interaction.user, discord.Member) else None
+    if not admin_store.is_admin_in_context(interaction.user.id, member):
         await interaction.response.send_message(
             "❌ You don't have permission to run this command.",
             ephemeral=True,
