@@ -1,6 +1,7 @@
 """Discord bot with menu-based support system and analytics."""
 
 import random
+import subprocess
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -28,6 +29,26 @@ from src.views.support_menu import (
 # Discord embed limits
 EMBED_DESCRIPTION_LIMIT = 4096
 EMBED_FIELD_LIMIT = 1024
+
+
+def get_git_commit() -> str:
+    """Get the current git commit hash (short)."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+# Cache commit at startup
+GIT_COMMIT = get_git_commit()
 EMBED_TOTAL_LIMIT = 6000
 
 
@@ -785,9 +806,9 @@ async def about_command(interaction: discord.Interaction):
         inline=False,
     )
 
-    # Footer with version
+    # Footer with version and commit
     embed.set_footer(
-        text=f"Xenon Support Bot v1.0 • Serving {len(bot.guilds)} servers",
+        text=f"Xenon Support Bot v1.0 ({GIT_COMMIT}) • Serving {len(bot.guilds)} servers",
         icon_url=bot.user.display_avatar.url if bot.user else None,
     )
 
