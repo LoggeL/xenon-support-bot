@@ -12,8 +12,6 @@ class Settings(BaseSettings):
 
     # Discord
     discord_token: str
-    owner_user_id: int  # Bot owner - can manage admins
-    admin_user_ids: str = ""  # Deprecated - use /admin commands instead
 
     # OpenRouter
     openrouter_api_key: str
@@ -24,12 +22,6 @@ class Settings(BaseSettings):
 
     # Paths
     data_dir: Path = Path(__file__).parent.parent / "data"
-
-    @property
-    def admin_ids(self) -> set[int]:
-        if not self.admin_user_ids:
-            return set()
-        return {int(uid.strip()) for uid in self.admin_user_ids.split(",") if uid.strip()}
 
     @property
     def docs_dir(self) -> Path:

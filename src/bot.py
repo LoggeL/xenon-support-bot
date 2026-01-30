@@ -148,7 +148,6 @@ class XenonSupportBot(commands.Bot):
         self.tree.add_command(support_analytics_command)
         self.tree.add_command(support_unanswered_command)
         self.tree.add_command(support_config_group)
-        self.tree.add_command(admin_group)
         self.tree.add_command(scrape_command)
         self.tree.add_command(stats_command)
         self.tree.add_command(about_command)
@@ -156,8 +155,7 @@ class XenonSupportBot(commands.Bot):
 
     async def on_ready(self):
         print(f"Logged in as {self.user}")
-        print(f"Owner: {settings.owner_user_id}")
-        print(f"Admins: {admin_store.get_all()}")
+        print(f"Whitelisted admins: {admin_store.get_all()}")
         print("Bot is ready! Use /setup-support-menu to create a support channel.")
 
         if not doc_store.is_initialized():
@@ -435,96 +433,6 @@ async def config_show(interaction: discord.Interaction):
         )
     else:
         embed.add_field(name="Community Support Channel", value="Not set", inline=True)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-# Admin command group (owner-only)
-admin_group = app_commands.Group(
-    name="admin",
-    description="Manage bot administrators (owner only)",
-)
-
-
-@admin_group.command(name="add", description="Promote a user to admin")
-@app_commands.describe(user="The user to promote to admin")
-async def admin_add(interaction: discord.Interaction, user: discord.User):
-    """Add a user as admin."""
-    if not admin_store.is_owner(interaction.user.id):
-        await interaction.response.send_message(
-            "❌ Only the bot owner can manage admins.",
-            ephemeral=True,
-        )
-        return
-
-    if admin_store.add_admin(user.id):
-        await interaction.response.send_message(
-            f"✅ {user.mention} is now an admin.",
-            ephemeral=True,
-        )
-    else:
-        await interaction.response.send_message(
-            f"ℹ️ {user.mention} is already an admin.",
-            ephemeral=True,
-        )
-
-
-@admin_group.command(name="remove", description="Demote an admin")
-@app_commands.describe(user="The admin to demote")
-async def admin_remove(interaction: discord.Interaction, user: discord.User):
-    """Remove admin status from a user."""
-    if not admin_store.is_owner(interaction.user.id):
-        await interaction.response.send_message(
-            "❌ Only the bot owner can manage admins.",
-            ephemeral=True,
-        )
-        return
-
-    if user.id == settings.owner_user_id:
-        await interaction.response.send_message(
-            "❌ Cannot remove the owner from admins.",
-            ephemeral=True,
-        )
-        return
-
-    if admin_store.remove_admin(user.id):
-        await interaction.response.send_message(
-            f"✅ {user.mention} is no longer an admin.",
-            ephemeral=True,
-        )
-    else:
-        await interaction.response.send_message(
-            f"ℹ️ {user.mention} is not an admin.",
-            ephemeral=True,
-        )
-
-
-@admin_group.command(name="list", description="List all current admins")
-async def admin_list(interaction: discord.Interaction):
-    """List all admins."""
-    if not admin_store.is_owner(interaction.user.id):
-        await interaction.response.send_message(
-            "❌ Only the bot owner can manage admins.",
-            ephemeral=True,
-        )
-        return
-
-    admins = admin_store.get_all()
-    owner_id = settings.owner_user_id
-
-    lines = []
-    for admin_id in sorted(admins):
-        if admin_id == owner_id:
-            lines.append(f"<@{admin_id}> (owner)")
-        else:
-            lines.append(f"<@{admin_id}>")
-
-    embed = discord.Embed(
-        title="🔐 Bot Administrators",
-        description="\n".join(lines) if lines else "No admins configured.",
-        color=discord.Color.blue(),
-    )
-    embed.set_footer(text=f"Total: {len(admins)} admin(s)")
 
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
