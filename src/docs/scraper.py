@@ -13,6 +13,15 @@ from bs4 import BeautifulSoup
 WIKI_BASE = "https://wiki.xenon.bot"
 DEFAULT_DATA_DIR = Path(__file__).parent.parent.parent / "data"
 
+
+def decode_cloudflare_email(encoded: str) -> str:
+    """Decode Cloudflare-protected email addresses."""
+    try:
+        key = int(encoded[:2], 16)
+        return ''.join(chr(int(encoded[i:i+2], 16) ^ key) for i in range(2, len(encoded), 2))
+    except (ValueError, IndexError):
+        return "[email protected]"
+
 DOC_PAGES = [
     ("home", "/en/home"),
     ("faq", "/en/faq"),
@@ -129,6 +138,13 @@ async def scrape_page(client: httpx.AsyncClient, slug: str, path: str) -> DocPag
 
     # Parse the content HTML
     soup = BeautifulSoup(content_html, "html.parser")
+
+    # Decode Cloudflare-protected emails
+    for cf_email in soup.find_all("a", class_="__cf_email__"):
+        encoded = cf_email.get("data-cfemail", "")
+        if encoded:
+            decoded_email = decode_cloudflare_email(encoded)
+            cf_email.replace_with(decoded_email)
 
     sections: list[DocSection] = []
     current_heading = ""
