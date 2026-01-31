@@ -68,6 +68,7 @@ class SupportResponseView(discord.ui.View):
         question_id: int,
         original_question: str,
         bot_response: str,
+        steps_taken: list[str] | None = None,
         community_channel_id: int | None = None,
         on_resolved: Callable[[int], Awaitable[None]],
         on_community_support: Callable[[int], Awaitable[None]],
@@ -77,6 +78,7 @@ class SupportResponseView(discord.ui.View):
         self.question_id = question_id
         self.original_question = original_question
         self.bot_response = bot_response
+        self.steps_taken = steps_taken or []
         self.community_channel_id = community_channel_id
         self.on_resolved = on_resolved
         self.on_community_support = on_community_support
@@ -95,9 +97,9 @@ class SupportResponseView(discord.ui.View):
         """Mark question as resolved."""
         await self.on_resolved(self.question_id)
 
-        # Disable all buttons
+        # Disable only interactive buttons (not link buttons)
         for item in self.children:
-            if isinstance(item, discord.ui.Button):
+            if isinstance(item, discord.ui.Button) and item.style != discord.ButtonStyle.link:
                 item.disabled = True
 
         # Update message
@@ -121,9 +123,9 @@ class SupportResponseView(discord.ui.View):
         """Post question to community support channel."""
         await self.on_community_support(self.question_id)
 
-        # Disable all buttons
+        # Disable only interactive buttons (not link buttons)
         for item in self.children:
-            if isinstance(item, discord.ui.Button):
+            if isinstance(item, discord.ui.Button) and item.style != discord.ButtonStyle.link:
                 item.disabled = True
 
         # Update message with footer
@@ -161,6 +163,14 @@ class SupportResponseView(discord.ui.View):
                     value="The AI support bot wasn't able to fully answer this question.",
                     inline=True,
                 )
+                # Add steps already tried by the bot
+                if self.steps_taken:
+                    steps_text = "\n".join(f"• {step}" for step in self.steps_taken[:5])
+                    help_embed.add_field(
+                        name="🔧 Already tried",
+                        value=steps_text,
+                        inline=False,
+                    )
                 help_embed.set_footer(text="Please help if you can!")
 
                 try:

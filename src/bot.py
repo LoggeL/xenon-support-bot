@@ -369,11 +369,18 @@ class XenonSupportBot(commands.Bot):
             async def rephrase_question(q: str) -> str:
                 return await self.rephrase_for_community(q)
 
+            # Extract step descriptions for community support
+            steps_taken = [
+                step.description for step in steps
+                if step.type == "tool_call" and step.description
+            ]
+
             # Add link buttons from agent response
             view = SupportResponseView(
                 question_id=question_id,
                 original_question=question,
                 bot_response=final_response,
+                steps_taken=steps_taken,
                 community_channel_id=srv_settings.community_support_channel_id,
                 on_resolved=analytics.mark_answered,
                 on_community_support=analytics.mark_community_support,
