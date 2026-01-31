@@ -32,6 +32,30 @@ class SupportQuestionModal(discord.ui.Modal):
         await self.on_submit_callback(interaction, self.question.value)
 
 
+class FollowUpModal(discord.ui.Modal):
+    """Modal for entering a follow-up question."""
+
+    question = discord.ui.TextInput(
+        label="Follow-up Question",
+        style=discord.TextStyle.paragraph,
+        placeholder="Ask a follow-up question about the previous answer...",
+        max_length=1000,
+        required=True,
+    )
+
+    def __init__(
+        self,
+        *,
+        on_submit: Callable[[discord.Interaction, str], Awaitable[None]],
+    ):
+        super().__init__(title="Follow-up Question")
+        self.on_submit_callback = on_submit
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Handle modal submission."""
+        await self.on_submit_callback(interaction, self.question.value)
+
+
 class SupportMenuView(discord.ui.View):
     """Persistent menu view with 'Ask a Question' button."""
 
@@ -60,7 +84,7 @@ class SupportMenuView(discord.ui.View):
 
 
 class SupportResponseView(discord.ui.View):
-    """Response view with Resolved and Community Support buttons."""
+    """Response view with Resolved, Follow-up, and Community Support buttons."""
 
     def __init__(
         self,
@@ -69,9 +93,11 @@ class SupportResponseView(discord.ui.View):
         original_question: str,
         bot_response: str,
         steps_taken: list[str] | None = None,
+        conversation_history: list[dict] | None = None,
         community_channel_id: int | None = None,
         on_resolved: Callable[[int], Awaitable[None]],
         on_community_support: Callable[[int], Awaitable[None]],
+        on_followup: Callable[[discord.Interaction, str, list[dict]], Awaitable[None]] | None = None,
         on_rephrase: Callable[[str], Awaitable[str]] | None = None,
     ):
         super().__init__(timeout=300)  # 5 minute timeout
@@ -79,9 +105,11 @@ class SupportResponseView(discord.ui.View):
         self.original_question = original_question
         self.bot_response = bot_response
         self.steps_taken = steps_taken or []
+        self.conversation_history = conversation_history or []
         self.community_channel_id = community_channel_id
         self.on_resolved = on_resolved
         self.on_community_support = on_community_support
+        self.on_followup = on_followup
         self.on_rephrase = on_rephrase
 
     @discord.ui.button(
@@ -109,6 +137,30 @@ class SupportResponseView(discord.ui.View):
 
         await interaction.response.edit_message(embed=embed, view=self)
         self.stop()
+
+    @discord.ui.button(
+        label="Follow-up",
+        style=discord.ButtonStyle.primary,
+        emoji="🔄",
+    )
+    async def followup_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        """Ask a follow-up question."""
+        if not self.on_followup:
+            await interaction.response.send_message(
+                "Follow-up questions are not available.",
+                ephemeral=True,
+            )
+            return
+
+        async def handle_followup(inter: discord.Interaction, question: str) -> None:
+            await self.on_followup(inter, question, self.conversation_history)
+
+        modal = FollowUpModal(on_submit=handle_followup)
+        await interaction.response.send_modal(modal)
 
     @discord.ui.button(
         label="Community Support",

@@ -92,10 +92,20 @@ def truncate_text(text: str, limit: int) -> str:
 def create_response_embed(
     content: str,
     steps: list[AgentStep],
+    question: str | None = None,
+    user: discord.User | discord.Member | None = None,
     color: discord.Color = discord.Color.blue(),
 ) -> discord.Embed:
     """Create a response embed with proper length handling."""
     embed = discord.Embed(color=color)
+
+    # Add user's question as author
+    if question and user:
+        embed.set_author(
+            name=f"{user.display_name} asked:",
+            icon_url=user.display_avatar.url,
+        )
+        embed.title = truncate_text(question, 256)
 
     # Add steps as a field
     if steps:
@@ -112,9 +122,10 @@ def create_response_embed(
     # Add response as description
     # Account for field length in total
     field_length = sum(len(f.name) + len(str(f.value)) for f in embed.fields)
+    title_length = len(embed.title or "")
     available_for_description = min(
         EMBED_DESCRIPTION_LIMIT,
-        EMBED_TOTAL_LIMIT - field_length - 100,  # Buffer for title etc
+        EMBED_TOTAL_LIMIT - field_length - title_length - 150,  # Buffer for author etc
     )
 
     embed.description = truncate_text(content, available_for_description)
@@ -362,10 +373,12 @@ class XenonSupportBot(commands.Bot):
             return
 
         if final_response:
-            # Create response embed
+            # Create response embed with user's question
             response_embed = create_response_embed(
                 final_response,
                 steps,
+                question=question,
+                user=interaction.user,
                 color=discord.Color.green(),
             )
 
@@ -379,15 +392,189 @@ class XenonSupportBot(commands.Bot):
                 if step.type == "tool_call" and step.description
             ]
 
+            # Build conversation history for follow-ups
+            conversation_history = [
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": final_response},
+            ]
+
+            # Follow-up callback
+            async def handle_followup(
+                followup_interaction: discord.Interaction,
+                followup_question: str,
+                history: list[dict],
+            ) -> None:
+                await self.handle_followup_question(
+                    followup_interaction,
+                    followup_question,
+                    history,
+                    guild_id,
+                    srv_settings,
+                )
+
             # Add link buttons from agent response
             view = SupportResponseView(
                 question_id=question_id,
                 original_question=question,
                 bot_response=final_response,
                 steps_taken=steps_taken,
+                conversation_history=conversation_history,
                 community_channel_id=srv_settings.community_support_channel_id,
                 on_resolved=analytics.mark_answered,
                 on_community_support=analytics.mark_community_support,
+                on_followup=handle_followup,
+                on_rephrase=rephrase_question,
+            )
+
+            # Add link buttons from agent
+            for btn in response_buttons[:3]:
+                if btn.type == "link" and btn.url:
+                    view.add_item(
+                        discord.ui.Button(
+                            style=discord.ButtonStyle.link,
+                            label=btn.label[:80],
+                            url=btn.url,
+                        )
+                    )
+
+            await interaction.edit_original_response(embed=response_embed, view=view)
+        else:
+            no_response_embed = discord.Embed(
+                description="🤔 I couldn't generate a response. Please try rephrasing your question.",
+                color=discord.Color.orange(),
+            )
+            await interaction.edit_original_response(embed=no_response_embed)
+
+    async def handle_followup_question(
+        self,
+        interaction: discord.Interaction,
+        question: str,
+        history: list[dict],
+        guild_id: int,
+        srv_settings,
+    ) -> None:
+        """Handle a follow-up question with conversation history."""
+        # Check rate limit
+        if not self.rate_limiter.is_allowed(interaction.user.id):
+            wait_time = self.rate_limiter.time_until_allowed(interaction.user.id)
+            await interaction.response.send_message(
+                f"⏱️ Rate limited. Please wait {wait_time:.0f} seconds.",
+                ephemeral=True,
+            )
+            return
+
+        # Send processing message
+        await interaction.response.send_message(
+            embed=create_thinking_embed([]),
+            ephemeral=True,
+        )
+
+        # Log question to analytics
+        question_id = await analytics.log_question(
+            guild_id=guild_id,
+            user_id=interaction.user.id,
+            channel_id=interaction.channel_id or 0,
+            question=f"[Follow-up] {question}",
+        )
+
+        # Tool call callback for analytics
+        async def on_tool_call(name: str, args: dict, result: dict) -> None:
+            await analytics.log_tool_call(question_id, name, args, result)
+
+        # Run agent with history
+        steps: list[AgentStep] = []
+        final_response: str | None = None
+        response_buttons: list[ButtonData] = []
+        is_irrelevant = False
+
+        try:
+            async for step in self.agent_runner.run(
+                user_message=question,
+                history=history,
+                on_tool_call=on_tool_call,
+            ):
+                steps.append(step)
+
+                if step.type == "tool_call":
+                    thinking_embed = create_thinking_embed(steps)
+                    await interaction.edit_original_response(embed=thinking_embed)
+
+                elif step.type == "irrelevant":
+                    is_irrelevant = True
+                    break
+
+                elif step.type == "response":
+                    final_response = step.response
+                    response_buttons = step.buttons
+
+        except Exception as e:
+            print(f"Agent error: {e}")
+            error_embed = discord.Embed(
+                description="❌ Sorry, I encountered an error processing your request.",
+                color=discord.Color.red(),
+            )
+            await interaction.edit_original_response(embed=error_embed)
+            return
+
+        if is_irrelevant:
+            irrelevant_embed = discord.Embed(
+                description="🤔 This question doesn't seem to be about Xenon. I can only help with Xenon-related questions.",
+                color=discord.Color.greyple(),
+            )
+            await interaction.edit_original_response(embed=irrelevant_embed)
+            return
+
+        if final_response:
+            # Create response embed with user's question
+            response_embed = create_response_embed(
+                final_response,
+                steps,
+                question=question,
+                user=interaction.user,
+                color=discord.Color.green(),
+            )
+
+            # Rephrase callback for community support
+            async def rephrase_question(q: str) -> str:
+                return await self.rephrase_for_community(q)
+
+            # Extract step descriptions for community support
+            steps_taken = [
+                step.description for step in steps
+                if step.type == "tool_call" and step.description
+            ]
+
+            # Build updated conversation history
+            new_history = history + [
+                {"role": "user", "content": question},
+                {"role": "assistant", "content": final_response},
+            ]
+
+            # Follow-up callback
+            async def handle_followup(
+                followup_interaction: discord.Interaction,
+                followup_question: str,
+                hist: list[dict],
+            ) -> None:
+                await self.handle_followup_question(
+                    followup_interaction,
+                    followup_question,
+                    hist,
+                    guild_id,
+                    srv_settings,
+                )
+
+            # Create view with buttons
+            view = SupportResponseView(
+                question_id=question_id,
+                original_question=question,
+                bot_response=final_response,
+                steps_taken=steps_taken,
+                conversation_history=new_history,
+                community_channel_id=srv_settings.community_support_channel_id,
+                on_resolved=analytics.mark_answered,
+                on_community_support=analytics.mark_community_support,
+                on_followup=handle_followup,
                 on_rephrase=rephrase_question,
             )
 
