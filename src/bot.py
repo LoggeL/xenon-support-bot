@@ -91,7 +91,7 @@ def truncate_text(text: str, limit: int) -> str:
 
 def create_response_embed(
     content: str,
-    steps: list[AgentStep],
+    steps_summary: str | None = None,
     question: str | None = None,
     user: discord.User | discord.Member | None = None,
     color: discord.Color = discord.Color.blue(),
@@ -107,17 +107,13 @@ def create_response_embed(
         )
         embed.title = truncate_text(question, 256)
 
-    # Add steps as a field
-    if steps:
-        steps_text = "\n".join(
-            f"{step.emoji} {step.description}" for step in steps if step.type == "tool_call"
+    # Add steps summary as a field
+    if steps_summary:
+        embed.add_field(
+            name="🔧 What I checked",
+            value=truncate_text(steps_summary, EMBED_FIELD_LIMIT),
+            inline=False,
         )
-        if steps_text:
-            embed.add_field(
-                name="🔧 Steps Taken",
-                value=truncate_text(steps_text, EMBED_FIELD_LIMIT),
-                inline=False,
-            )
 
     # Add response as description
     # Account for field length in total
@@ -265,6 +261,43 @@ class XenonSupportBot(commands.Bot):
 
         return question  # Fall back to original
 
+    async def summarize_steps(self, steps: list[AgentStep]) -> str | None:
+        """Summarize the steps taken by the agent in a concise way."""
+        from src.agent.client import Message
+
+        # Extract tool call descriptions
+        tool_calls = [
+            step.description for step in steps
+            if step.type == "tool_call" and step.description
+        ]
+
+        if not tool_calls:
+            return None
+
+        steps_text = "\n".join(f"- {desc}" for desc in tool_calls)
+
+        messages = [
+            Message(
+                role="system",
+                content=(
+                    "Summarize what documentation sources were checked in ONE short sentence. "
+                    "Be very concise (under 100 chars). Example: 'Checked FAQ and backups docs.' "
+                    "Output ONLY the summary, nothing else."
+                ),
+            ),
+            Message(role="user", content=f"Steps taken:\n{steps_text}"),
+        ]
+
+        try:
+            response = await self.openrouter_client.chat(messages)
+            if response.content:
+                return response.content.strip()
+        except Exception:
+            pass
+
+        # Fallback: just list the docs checked
+        return None
+
     async def handle_question(
         self,
         interaction: discord.Interaction,
@@ -373,10 +406,13 @@ class XenonSupportBot(commands.Bot):
             return
 
         if final_response:
+            # Summarize steps for display
+            steps_summary = await self.summarize_steps(steps)
+
             # Create response embed with user's question
             response_embed = create_response_embed(
                 final_response,
-                steps,
+                steps_summary=steps_summary,
                 question=question,
                 user=interaction.user,
                 color=discord.Color.green(),
@@ -525,10 +561,13 @@ class XenonSupportBot(commands.Bot):
             return
 
         if final_response:
+            # Summarize steps for display
+            steps_summary = await self.summarize_steps(steps)
+
             # Create response embed with user's question
             response_embed = create_response_embed(
                 final_response,
-                steps,
+                steps_summary=steps_summary,
                 question=question,
                 user=interaction.user,
                 color=discord.Color.green(),
