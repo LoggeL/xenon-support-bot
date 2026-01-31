@@ -1,18 +1,17 @@
-"""Analytics storage using SQLite for question tracking."""
+"""Analytics storage using PostgreSQL for question tracking."""
 
-import aiosqlite
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from src.config import settings
+from src.database import get_pool
 
 
 @dataclass
 class QuestionRecord:
     """A logged question with metadata."""
+
     id: int
     guild_id: int
     user_id: int
@@ -24,52 +23,7 @@ class QuestionRecord:
 
 
 class Analytics:
-    """SQLite-based analytics for question tracking."""
-
-    def __init__(self, db_path: Path | None = None):
-        self.db_path = db_path or (settings.data_dir / "analytics.db")
-        self._initialized = False
-
-    async def init(self) -> None:
-        """Initialize database schema."""
-        if self._initialized:
-            return
-
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS questions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    question TEXT NOT NULL,
-                    answered INTEGER NOT NULL DEFAULT 0,
-                    community_support_clicked INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS tool_calls (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    question_id INTEGER NOT NULL REFERENCES questions(id),
-                    tool_name TEXT NOT NULL,
-                    arguments TEXT,
-                    result TEXT,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_questions_guild ON questions(guild_id)"
-            )
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_questions_answered ON questions(answered)"
-            )
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tool_calls_question ON tool_calls(question_id)"
-            )
-            await db.commit()
-
-        self._initialized = True
+    """PostgreSQL-based analytics for question tracking."""
 
     async def log_question(
         self,
@@ -79,17 +33,20 @@ class Analytics:
         question: str,
     ) -> int:
         """Log a new question, returns question_id."""
-        await self.init()
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
                 """
                 INSERT INTO questions (guild_id, user_id, channel_id, question)
-                VALUES (?, ?, ?, ?)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
                 """,
-                (guild_id, user_id, channel_id, question),
+                guild_id,
+                user_id,
+                channel_id,
+                question,
             )
-            await db.commit()
-            return cursor.lastrowid or 0
+            return row["id"]
 
     async def log_tool_call(
         self,
@@ -99,36 +56,36 @@ class Analytics:
         result: dict[str, Any],
     ) -> None:
         """Log a tool call for a question."""
-        await self.init()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
                 """
                 INSERT INTO tool_calls (question_id, tool_name, arguments, result)
-                VALUES (?, ?, ?, ?)
+                VALUES ($1, $2, $3, $4)
                 """,
-                (question_id, tool_name, json.dumps(arguments), json.dumps(result)),
+                question_id,
+                tool_name,
+                json.dumps(arguments),
+                json.dumps(result),
             )
-            await db.commit()
 
     async def mark_answered(self, question_id: int) -> None:
         """Mark a question as answered."""
-        await self.init()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "UPDATE questions SET answered = 1 WHERE id = ?",
-                (question_id,),
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE questions SET answered = TRUE WHERE id = $1",
+                question_id,
             )
-            await db.commit()
 
     async def mark_community_support(self, question_id: int) -> None:
         """Mark that community support was clicked."""
-        await self.init()
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "UPDATE questions SET community_support_clicked = 1 WHERE id = ?",
-                (question_id,),
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE questions SET community_support_clicked = TRUE WHERE id = $1",
+                question_id,
             )
-            await db.commit()
 
     async def get_unanswered(
         self,
@@ -137,20 +94,20 @@ class Analytics:
         limit: int = 10,
     ) -> list[QuestionRecord]:
         """Get recent unanswered questions."""
-        await self.init()
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
                 """
                 SELECT * FROM questions
-                WHERE guild_id = ? AND answered = 0 AND created_at >= ?
+                WHERE guild_id = $1 AND answered = FALSE AND created_at >= $2
                 ORDER BY created_at DESC
-                LIMIT ?
+                LIMIT $3
                 """,
-                (guild_id, cutoff.isoformat(), limit),
+                guild_id,
+                cutoff,
+                limit,
             )
-            rows = await cursor.fetchall()
             return [
                 QuestionRecord(
                     id=row["id"],
@@ -158,44 +115,44 @@ class Analytics:
                     user_id=row["user_id"],
                     channel_id=row["channel_id"],
                     question=row["question"],
-                    answered=bool(row["answered"]),
-                    community_support_clicked=bool(row["community_support_clicked"]),
-                    created_at=datetime.fromisoformat(row["created_at"]),
+                    answered=row["answered"],
+                    community_support_clicked=row["community_support_clicked"],
+                    created_at=row["created_at"],
                 )
                 for row in rows
             ]
 
     async def get_stats(self, guild_id: int, days: int = 7) -> dict[str, Any]:
         """Get analytics stats for a guild."""
-        await self.init()
-        cutoff = datetime.utcnow() - timedelta(days=days)
-        async with aiosqlite.connect(self.db_path) as db:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        pool = await get_pool()
+        async with pool.acquire() as conn:
             # Total questions
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM questions WHERE guild_id = ? AND created_at >= ?",
-                (guild_id, cutoff.isoformat()),
+            total = await conn.fetchval(
+                "SELECT COUNT(*) FROM questions WHERE guild_id = $1 AND created_at >= $2",
+                guild_id,
+                cutoff,
             )
-            total = (await cursor.fetchone())[0]
 
             # Answered questions
-            cursor = await db.execute(
+            answered = await conn.fetchval(
                 """
                 SELECT COUNT(*) FROM questions
-                WHERE guild_id = ? AND answered = 1 AND created_at >= ?
+                WHERE guild_id = $1 AND answered = TRUE AND created_at >= $2
                 """,
-                (guild_id, cutoff.isoformat()),
+                guild_id,
+                cutoff,
             )
-            answered = (await cursor.fetchone())[0]
 
             # Community support clicked
-            cursor = await db.execute(
+            community_clicked = await conn.fetchval(
                 """
                 SELECT COUNT(*) FROM questions
-                WHERE guild_id = ? AND community_support_clicked = 1 AND created_at >= ?
+                WHERE guild_id = $1 AND community_support_clicked = TRUE AND created_at >= $2
                 """,
-                (guild_id, cutoff.isoformat()),
+                guild_id,
+                cutoff,
             )
-            community_clicked = (await cursor.fetchone())[0]
 
             return {
                 "total": total,
@@ -208,43 +165,44 @@ class Analytics:
 
     async def get_global_stats(self) -> dict[str, Any]:
         """Get global analytics stats across all guilds."""
-        await self.init()
-        async with aiosqlite.connect(self.db_path) as db:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
             # Total questions all time
-            cursor = await db.execute("SELECT COUNT(*) FROM questions")
-            total_questions = (await cursor.fetchone())[0]
+            total_questions = await conn.fetchval("SELECT COUNT(*) FROM questions")
 
             # Answered questions all time
-            cursor = await db.execute("SELECT COUNT(*) FROM questions WHERE answered = 1")
-            total_answered = (await cursor.fetchone())[0]
+            total_answered = await conn.fetchval(
+                "SELECT COUNT(*) FROM questions WHERE answered = TRUE"
+            )
 
             # Total tool calls
-            cursor = await db.execute("SELECT COUNT(*) FROM tool_calls")
-            total_tool_calls = (await cursor.fetchone())[0]
+            total_tool_calls = await conn.fetchval("SELECT COUNT(*) FROM tool_calls")
 
             # Unique users
-            cursor = await db.execute("SELECT COUNT(DISTINCT user_id) FROM questions")
-            unique_users = (await cursor.fetchone())[0]
+            unique_users = await conn.fetchval(
+                "SELECT COUNT(DISTINCT user_id) FROM questions"
+            )
 
             # Unique guilds
-            cursor = await db.execute("SELECT COUNT(DISTINCT guild_id) FROM questions")
-            unique_guilds = (await cursor.fetchone())[0]
+            unique_guilds = await conn.fetchval(
+                "SELECT COUNT(DISTINCT guild_id) FROM questions"
+            )
 
             # Questions today
-            today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM questions WHERE created_at >= ?",
-                (today.isoformat(),)
+            today = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
             )
-            questions_today = (await cursor.fetchone())[0]
+            questions_today = await conn.fetchval(
+                "SELECT COUNT(*) FROM questions WHERE created_at >= $1",
+                today,
+            )
 
             # Questions this week
-            week_ago = datetime.utcnow() - timedelta(days=7)
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM questions WHERE created_at >= ?",
-                (week_ago.isoformat(),)
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+            questions_week = await conn.fetchval(
+                "SELECT COUNT(*) FROM questions WHERE created_at >= $1",
+                week_ago,
             )
-            questions_week = (await cursor.fetchone())[0]
 
             return {
                 "total_questions": total_questions,
@@ -254,7 +212,9 @@ class Analytics:
                 "unique_guilds": unique_guilds,
                 "questions_today": questions_today,
                 "questions_week": questions_week,
-                "answer_rate": (total_answered / total_questions * 100) if total_questions > 0 else 0,
+                "answer_rate": (
+                    (total_answered / total_questions * 100) if total_questions > 0 else 0
+                ),
             }
 
 

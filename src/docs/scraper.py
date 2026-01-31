@@ -191,12 +191,9 @@ async def scrape_page(client: httpx.AsyncClient, slug: str, path: str) -> DocPag
     return DocPage(slug=slug, title=title, url=url, sections=sections)
 
 
-async def scrape_all_docs(docs_dir: Path | None = None) -> list[DocPage]:
-    """Scrape all documentation pages."""
-    if docs_dir is None:
-        docs_dir = DEFAULT_DATA_DIR / "docs"
-
-    docs_dir.mkdir(parents=True, exist_ok=True)
+async def scrape_all_docs() -> list[DocPage]:
+    """Scrape all documentation pages and save to database."""
+    from src.docs.store import doc_store
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         tasks = [scrape_page(client, slug, path) for slug, path in DOC_PAGES]
@@ -204,17 +201,11 @@ async def scrape_all_docs(docs_dir: Path | None = None) -> list[DocPage]:
 
     docs = [doc for doc in results if doc is not None]
 
-    # Save each doc as JSON
+    # Save each doc to PostgreSQL
     for doc in docs:
-        doc_path = docs_dir / f"{doc.slug}.json"
-        doc_path.write_text(json.dumps(doc.to_dict(), indent=2))
+        await doc_store.save_doc(doc)
 
-    # Save manifest (list of all docs with titles)
-    manifest = [{"slug": d.slug, "title": d.title, "url": d.url} for d in docs]
-    manifest_path = docs_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
-
-    print(f"Scraped {len(docs)} documentation pages")
+    print(f"Scraped {len(docs)} documentation pages to database")
     return docs
 
 

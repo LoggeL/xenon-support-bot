@@ -70,7 +70,7 @@ TOOLS: list[Tool] = [
 ]
 
 
-def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+async def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Execute a tool and return the result."""
 
     if name == "check_relevance":
@@ -106,9 +106,10 @@ def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if not slug:
             return {"error": "No slug provided"}
 
-        text = doc_store.get_doc_text(slug)
+        text = await doc_store.get_doc_text(slug)
         if not text:
-            available = [d.slug for d in doc_store.get_manifest()]
+            manifest = await doc_store.get_manifest()
+            available = [d.slug for d in manifest]
             return {
                 "error": f"Document '{slug}' not found",
                 "available_slugs": available,

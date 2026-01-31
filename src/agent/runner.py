@@ -37,9 +37,9 @@ class AgentStep:
     buttons: list[ButtonData] = field(default_factory=list)
 
 
-def build_system_prompt() -> str:
+async def build_system_prompt() -> str:
     """Build the system prompt with available doc titles."""
-    doc_titles = doc_store.get_doc_titles_for_prompt()
+    doc_titles = await doc_store.get_doc_titles_for_prompt()
 
     return f"""You are a helpful support assistant for Xenon, a Discord bot for server backups and templates.
 
@@ -160,7 +160,7 @@ class AgentRunner:
             channel_context: Recent channel messages for context [{"author": "...", "content": "..."}]
         """
         # Build messages
-        messages: list[Message] = [Message(role="system", content=build_system_prompt())]
+        messages: list[Message] = [Message(role="system", content=await build_system_prompt())]
 
         # Add history (last 5 messages)
         if history:
@@ -209,7 +209,7 @@ class AgentRunner:
                 )
 
                 # Execute the tool
-                result = execute_tool(tool_call.name, tool_call.arguments)
+                result = await execute_tool(tool_call.name, tool_call.arguments)
 
                 # Call the callback if provided
                 if on_tool_call:

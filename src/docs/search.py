@@ -8,7 +8,6 @@ from whoosh.qparser import MultifieldParser, OrGroup
 from whoosh.analysis import StemmingAnalyzer
 
 from src.docs.scraper import DEFAULT_DATA_DIR
-from src.docs.store import doc_store
 
 
 # Schema for the search index
@@ -42,8 +41,10 @@ class DocSearch:
 
         return self._ix
 
-    def rebuild_index(self) -> int:
-        """Rebuild the search index from stored docs."""
+    async def rebuild_index(self) -> int:
+        """Rebuild the search index from stored docs in PostgreSQL."""
+        from src.docs.store import doc_store
+
         self.index_dir.mkdir(parents=True, exist_ok=True)
 
         # Always create fresh index
@@ -53,7 +54,7 @@ class DocSearch:
         writer = ix.writer()
         doc_count = 0
 
-        for doc in doc_store.get_all_docs():
+        for doc in await doc_store.get_all_docs():
             for section in doc.sections:
                 writer.add_document(
                     slug=doc.slug,

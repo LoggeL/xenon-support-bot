@@ -161,6 +161,10 @@ class XenonSupportBot(commands.Bot):
 
     async def setup_hook(self):
         """Set up slash commands and persistent views."""
+        # Initialize database schema
+        from src.database import init_schema
+        await init_schema()
+
         # Register persistent view
         self.add_view(SupportMenuView(on_question=self.handle_question))
 
@@ -179,7 +183,7 @@ class XenonSupportBot(commands.Bot):
         print(f"Whitelisted admins: {admin_store.get_all()}")
         print("Bot is ready! Use /setup-support-menu to create a support channel.")
 
-        if not doc_store.is_initialized():
+        if not await doc_store.is_initialized():
             print("⚠️  Documentation not scraped yet. Run /scrape command.")
 
         # Start status rotation
@@ -266,7 +270,7 @@ class XenonSupportBot(commands.Bot):
             return
 
         # Auto-scrape if docs aren't initialized
-        if not doc_store.is_initialized():
+        if not await doc_store.is_initialized():
             await interaction.response.send_message(
                 embed=discord.Embed(
                     description="📚 Documentation not loaded yet. Auto-scraping...",
@@ -277,7 +281,7 @@ class XenonSupportBot(commands.Bot):
 
             try:
                 docs = await scrape_all_docs()
-                doc_search.rebuild_index()
+                await doc_search.rebuild_index()
                 await interaction.edit_original_response(
                     embed=discord.Embed(
                         description=f"✅ Scraped {len(docs)} documentation pages. Processing your question...",
@@ -301,7 +305,7 @@ class XenonSupportBot(commands.Bot):
 
         # Get server settings
         guild_id = interaction.guild_id or 0
-        srv_settings = server_config.get(guild_id)
+        srv_settings = await server_config.get(guild_id)
 
         # Log question to analytics
         question_id = await analytics.log_question(
@@ -423,7 +427,7 @@ async def config_show(interaction: discord.Interaction):
         await interaction.response.send_message("❌ This command only works in servers.", ephemeral=True)
         return
 
-    srv_settings = server_config.get(interaction.guild_id)
+    srv_settings = await server_config.get(interaction.guild_id)
 
     embed = discord.Embed(
         title="⚙️ Support Bot Configuration",
@@ -480,7 +484,7 @@ async def scrape_command(interaction: discord.Interaction):
 
     try:
         docs = await scrape_all_docs()
-        section_count = doc_search.rebuild_index()
+        section_count = await doc_search.rebuild_index()
 
         await interaction.followup.send(
             f"✅ Scraped {len(docs)} documentation pages and indexed {section_count} sections.",
@@ -533,7 +537,7 @@ async def setup_support_menu_command(
         return
 
     # Save config
-    server_config.update(
+    await server_config.update(
         interaction.guild_id,
         support_channel_id=channel.id,
         menu_message_id=message.id,

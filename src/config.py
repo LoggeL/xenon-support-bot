@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     openrouter_model: str = "openai/gpt-5.1"
 
+    # Database
+    database_url: str  # postgresql://user:pass@host:port/dbname
+
     # Rate limiting
     rate_limit_per_minute: int = 5
 

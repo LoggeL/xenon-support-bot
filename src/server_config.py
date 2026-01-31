@@ -1,11 +1,9 @@
-"""Per-server configuration storage."""
+"""Per-server configuration storage using PostgreSQL."""
 
-import json
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
+from dataclasses import dataclass, asdict
 from typing import Any
 
-from src.config import settings
+from src.database import get_pool
 
 
 @dataclass
@@ -15,7 +13,7 @@ class ServerSettings:
     guild_id: int
     support_role_id: int | None = None
     ticket_channel_id: int | None = None
-    ephemeral_processing: bool = False  # Default to public processing messages
+    ephemeral_processing: bool = False
     support_channel_id: int | None = None
     menu_message_id: int | None = None
     community_support_channel_id: int | None = None
@@ -24,62 +22,81 @@ class ServerSettings:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ServerSettings":
+    def from_row(cls, row: Any) -> "ServerSettings":
         return cls(
-            guild_id=data.get("guild_id", 0),
-            support_role_id=data.get("support_role_id"),
-            ticket_channel_id=data.get("ticket_channel_id"),
-            ephemeral_processing=data.get("ephemeral_processing", False),
-            support_channel_id=data.get("support_channel_id"),
-            menu_message_id=data.get("menu_message_id"),
-            community_support_channel_id=data.get("community_support_channel_id"),
+            guild_id=row["guild_id"],
+            support_role_id=row["support_role_id"],
+            ticket_channel_id=row["ticket_channel_id"],
+            ephemeral_processing=row["ephemeral_processing"],
+            support_channel_id=row["support_channel_id"],
+            menu_message_id=row["menu_message_id"],
+            community_support_channel_id=row["community_support_channel_id"],
         )
 
 
 class ServerConfigStore:
-    """Manages per-server configuration stored as JSON files."""
+    """Manages per-server configuration in PostgreSQL."""
 
-    def __init__(self, config_dir: Path | None = None):
-        self.config_dir = config_dir or (settings.data_dir / "servers")
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self):
         self._cache: dict[int, ServerSettings] = {}
 
-    def _get_path(self, guild_id: int) -> Path:
-        return self.config_dir / f"{guild_id}.json"
-
-    def get(self, guild_id: int) -> ServerSettings:
+    async def get(self, guild_id: int) -> ServerSettings:
         """Get server settings, creating defaults if not exists."""
         if guild_id in self._cache:
             return self._cache[guild_id]
 
-        path = self._get_path(guild_id)
-        if path.exists():
-            try:
-                data = json.loads(path.read_text())
-                server_settings = ServerSettings.from_dict(data)
-                self._cache[guild_id] = server_settings
-                return server_settings
-            except (json.JSONDecodeError, KeyError) as e:
-                print(f"Error loading server config for {guild_id}: {e}")
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM server_configs WHERE guild_id = $1",
+                guild_id,
+            )
 
-        # Return defaults
-        server_settings = ServerSettings(guild_id=guild_id)
-        self._cache[guild_id] = server_settings
-        return server_settings
+            if row:
+                server_settings = ServerSettings.from_row(row)
+            else:
+                server_settings = ServerSettings(guild_id=guild_id)
 
-    def save(self, server_settings: ServerSettings) -> None:
-        """Save server settings to disk."""
-        path = self._get_path(server_settings.guild_id)
-        path.write_text(json.dumps(server_settings.to_dict(), indent=2))
+            self._cache[guild_id] = server_settings
+            return server_settings
+
+    async def save(self, server_settings: ServerSettings) -> None:
+        """Save server settings to database."""
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO server_configs (
+                    guild_id, support_role_id, ticket_channel_id,
+                    ephemeral_processing, support_channel_id,
+                    menu_message_id, community_support_channel_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                ON CONFLICT (guild_id) DO UPDATE SET
+                    support_role_id = $2,
+                    ticket_channel_id = $3,
+                    ephemeral_processing = $4,
+                    support_channel_id = $5,
+                    menu_message_id = $6,
+                    community_support_channel_id = $7,
+                    updated_at = NOW()
+                """,
+                server_settings.guild_id,
+                server_settings.support_role_id,
+                server_settings.ticket_channel_id,
+                server_settings.ephemeral_processing,
+                server_settings.support_channel_id,
+                server_settings.menu_message_id,
+                server_settings.community_support_channel_id,
+            )
         self._cache[server_settings.guild_id] = server_settings
 
-    def update(self, guild_id: int, **kwargs) -> ServerSettings:
+    async def update(self, guild_id: int, **kwargs) -> ServerSettings:
         """Update specific fields for a server."""
-        server_settings = self.get(guild_id)
+        server_settings = await self.get(guild_id)
         for key, value in kwargs.items():
             if hasattr(server_settings, key):
                 setattr(server_settings, key, value)
-        self.save(server_settings)
+        await self.save(server_settings)
         return server_settings
 
 
