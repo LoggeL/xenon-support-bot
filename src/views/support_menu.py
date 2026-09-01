@@ -1,11 +1,9 @@
 """Support menu views: persistent menu, question modal, response buttons."""
 
-from typing import TYPE_CHECKING, Callable, Awaitable
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 import discord
-
-if TYPE_CHECKING:
-    from src.bot import XenonSupportBot
 
 
 class SupportQuestionModal(discord.ui.Modal):
@@ -97,7 +95,8 @@ class SupportResponseView(discord.ui.View):
         community_channel_id: int | None = None,
         on_resolved: Callable[[int], Awaitable[None]],
         on_community_support: Callable[[int], Awaitable[None]],
-        on_followup: Callable[[discord.Interaction, str, list[dict]], Awaitable[None]] | None = None,
+        on_followup: Callable[[discord.Interaction, str, list[dict]], Awaitable[None]]
+        | None = None,
         on_rephrase: Callable[[str], Awaitable[str]] | None = None,
     ):
         super().__init__(timeout=300)  # 5 minute timeout
@@ -131,7 +130,11 @@ class SupportResponseView(discord.ui.View):
                 item.disabled = True
 
         # Update message
-        embed = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
+        embed = (
+            interaction.message.embeds[0]
+            if interaction.message and interaction.message.embeds
+            else None
+        )
         if embed:
             embed.set_footer(text=f"✅ Marked as resolved by {interaction.user.display_name}")
 
@@ -155,9 +158,10 @@ class SupportResponseView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        on_followup = self.on_followup
 
         async def handle_followup(inter: discord.Interaction, question: str) -> None:
-            await self.on_followup(inter, question, self.conversation_history)
+            await on_followup(inter, question, self.conversation_history)
 
         modal = FollowUpModal(on_submit=handle_followup)
         await interaction.response.send_modal(modal)
@@ -181,7 +185,11 @@ class SupportResponseView(discord.ui.View):
                 item.disabled = True
 
         # Update message with footer
-        embed = interaction.message.embeds[0] if interaction.message and interaction.message.embeds else None
+        embed = (
+            interaction.message.embeds[0]
+            if interaction.message and interaction.message.embeds
+            else None
+        )
         if embed:
             embed.set_footer(text="💬 Redirected to community support")
 
@@ -194,10 +202,8 @@ class SupportResponseView(discord.ui.View):
                 # Rephrase the question if callback provided
                 rephrased = self.original_question
                 if self.on_rephrase:
-                    try:
+                    with suppress(Exception):
                         rephrased = await self.on_rephrase(self.original_question)
-                    except Exception:
-                        pass  # Fall back to original
 
                 # Create help request embed
                 help_embed = discord.Embed(

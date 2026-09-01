@@ -1,29 +1,33 @@
 """Discord bot with menu-based support system and analytics."""
 
+import logging
 import random
 import subprocess
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from src.config import settings
-from src.server_config import server_config
-from src.admin_store import admin_store
+from src.admin_store import AdminStore
+from src.agent.client import OpenAIResponsesClient
 from src.agent.runner import AgentRunner, AgentStep, ButtonData
-from src.agent.client import OpenRouterClient
+from src.analytics import analytics
+from src.config import Settings
+from src.database import close_pool, database, init_schema
 from src.docs.scraper import scrape_all_docs
 from src.docs.search import doc_search
 from src.docs.store import doc_store
-from src.analytics import analytics
+from src.server_config import ServerSettings, server_config
 from src.views.support_menu import (
     SupportMenuView,
     SupportResponseView,
     create_menu_embed,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Discord embed limits
@@ -94,10 +98,10 @@ def create_response_embed(
     steps_summary: str | None = None,
     question: str | None = None,
     user: discord.User | discord.Member | None = None,
-    color: discord.Color = discord.Color.blue(),
+    color: discord.Color | None = None,
 ) -> discord.Embed:
     """Create a response embed with proper length handling."""
-    embed = discord.Embed(color=color)
+    embed = discord.Embed(color=color or discord.Color.blue())
 
     # Add user's question as author
     if question and user:
@@ -117,7 +121,7 @@ def create_response_embed(
 
     # Add response as description
     # Account for field length in total
-    field_length = sum(len(f.name) + len(str(f.value)) for f in embed.fields)
+    field_length = sum(len(field.name or "") + len(str(field.value)) for field in embed.fields)
     title_length = len(embed.title or "")
     available_for_description = min(
         EMBED_DESCRIPTION_LIMIT,
@@ -151,7 +155,7 @@ def create_thinking_embed(steps: list[AgentStep]) -> discord.Embed:
 class XenonSupportBot(commands.Bot):
     """Xenon support bot."""
 
-    def __init__(self):
+    def __init__(self, config: Settings):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.messages = True
@@ -161,15 +165,16 @@ class XenonSupportBot(commands.Bot):
             intents=intents,
         )
 
-        self.rate_limiter = RateLimiter(settings.rate_limit_per_minute)
-        self.openrouter_client = OpenRouterClient()
-        self.agent_runner = AgentRunner(self.openrouter_client)
-        self.start_time = datetime.utcnow()
+        self.config = config
+        self.rate_limiter = RateLimiter(config.rate_limit_per_minute)
+        self.model_client = OpenAIResponsesClient(config)
+        self.agent_runner = AgentRunner(self.model_client)
+        self.admin_store = AdminStore(config.parsed_admin_user_ids)
+        self.start_time = datetime.now(UTC)
 
     async def setup_hook(self):
         """Set up slash commands and persistent views."""
-        # Initialize database schema
-        from src.database import init_schema
+        database.configure(self.config.database_url)
         await init_schema()
 
         # Register persistent view
@@ -186,15 +191,22 @@ class XenonSupportBot(commands.Bot):
         await self.tree.sync()
 
     async def on_ready(self):
-        print(f"Logged in as {self.user}")
-        print(f"Whitelisted admins: {admin_store.get_all()}")
-        print("Bot is ready! Use /setup-support-menu to create a support channel.")
+        logger.info("Logged in as %s", self.user)
+        logger.info("Configured bot administrators: %s", sorted(self.admin_store.get_all()))
 
         if not await doc_store.is_initialized():
-            print("⚠️  Documentation not scraped yet. Run /scrape command.")
+            logger.warning("Documentation is not loaded; run /scrape")
 
         # Start status rotation
-        self.rotate_status.start()
+        if not self.rotate_status.is_running():
+            self.rotate_status.start()
+
+    async def close(self) -> None:
+        """Release external clients before Discord shuts down."""
+        self.rotate_status.cancel()
+        await self.model_client.close()
+        await close_pool()
+        await super().close()
 
     @tasks.loop(minutes=10)
     async def rotate_status(self):
@@ -236,67 +248,33 @@ class XenonSupportBot(commands.Bot):
 
     async def rephrase_for_community(self, question: str) -> str:
         """Rephrase a question to be clearer for community support."""
-        from src.agent.client import Message
-
-        messages = [
-            Message(
-                role="system",
-                content=(
-                    "You are a helpful assistant. Rephrase the user's question to be clearer "
-                    "and more concise for community support volunteers to understand. "
-                    "Keep the core problem but make it easier to read. "
-                    "Output ONLY the rephrased question, nothing else. "
-                    "Keep it under 200 characters if possible."
-                ),
-            ),
-            Message(role="user", content=question),
-        ]
-
         try:
-            response = await self.openrouter_client.chat(messages)
-            if response.content:
-                return response.content.strip()
+            return await self.model_client.generate_text(
+                instructions=(
+                    "Rewrite the question for community support volunteers. Preserve all facts, "
+                    "remove ambiguity, use at most 200 characters, and output only the question."
+                ),
+                prompt=question,
+            )
         except Exception:
-            pass
+            logger.exception("Could not rephrase a community-support question")
 
-        return question  # Fall back to original
+        return question
 
     async def summarize_steps(self, steps: list[AgentStep]) -> str | None:
         """Summarize the steps taken by the agent in a concise way."""
-        from src.agent.client import Message
-
-        # Extract tool call descriptions
-        tool_calls = [
-            step.description for step in steps
-            if step.type == "tool_call" and step.description
+        pages = [
+            str(step.tool_args.get("slug"))
+            for step in steps
+            if step.type == "tool_call"
+            and step.tool_name == "get_doc"
+            and step.tool_args
+            and step.tool_args.get("slug")
         ]
-
-        if not tool_calls:
+        pages = list(dict.fromkeys(pages))
+        if not pages:
             return None
-
-        steps_text = "\n".join(f"- {desc}" for desc in tool_calls)
-
-        messages = [
-            Message(
-                role="system",
-                content=(
-                    "Summarize what documentation sources were checked in ONE short sentence. "
-                    "Be very concise (under 100 chars). Example: 'Checked FAQ and backups docs.' "
-                    "Output ONLY the summary, nothing else."
-                ),
-            ),
-            Message(role="user", content=f"Steps taken:\n{steps_text}"),
-        ]
-
-        try:
-            response = await self.openrouter_client.chat(messages)
-            if response.content:
-                return response.content.strip()
-        except Exception:
-            pass
-
-        # Fallback: just list the docs checked
-        return None
+        return f"Checked {', '.join(pages[:3])} documentation."
 
     async def handle_question(
         self,
@@ -328,14 +306,19 @@ class XenonSupportBot(commands.Bot):
                 await doc_search.rebuild_index()
                 await interaction.edit_original_response(
                     embed=discord.Embed(
-                        description=f"✅ Scraped {len(docs)} documentation pages. Processing your question...",
+                        description=(
+                            f"✅ Scraped {len(docs)} documentation pages. "
+                            "Processing your question..."
+                        ),
                         color=discord.Color.green(),
                     )
                 )
             except Exception as e:
                 await interaction.edit_original_response(
                     embed=discord.Embed(
-                        description=f"❌ Auto-scrape failed: {e}. Please ask an admin to run `/scrape`.",
+                        description=(
+                            f"❌ Auto-scrape failed: {e}. Please ask an admin to run `/scrape`."
+                        ),
                         color=discord.Color.red(),
                     )
                 )
@@ -388,8 +371,8 @@ class XenonSupportBot(commands.Bot):
                     final_response = step.response
                     response_buttons = step.buttons
 
-        except Exception as e:
-            print(f"Agent error: {e}")
+        except Exception:
+            logger.exception("Agent failed while answering a question")
             error_embed = discord.Embed(
                 description="❌ Sorry, I encountered an error processing your request.",
                 color=discord.Color.red(),
@@ -399,7 +382,10 @@ class XenonSupportBot(commands.Bot):
 
         if is_irrelevant:
             irrelevant_embed = discord.Embed(
-                description="🤔 This question doesn't seem to be about Xenon. I can only help with Xenon-related questions.",
+                description=(
+                    "🤔 This question doesn't seem to be about Xenon. "
+                    "I can only help with Xenon-related questions."
+                ),
                 color=discord.Color.greyple(),
             )
             await interaction.edit_original_response(embed=irrelevant_embed)
@@ -424,8 +410,7 @@ class XenonSupportBot(commands.Bot):
 
             # Extract step descriptions for community support
             steps_taken = [
-                step.description for step in steps
-                if step.type == "tool_call" and step.description
+                step.description for step in steps if step.type == "tool_call" and step.description
             ]
 
             # Build conversation history for follow-ups
@@ -476,7 +461,9 @@ class XenonSupportBot(commands.Bot):
             await interaction.edit_original_response(embed=response_embed, view=view)
         else:
             no_response_embed = discord.Embed(
-                description="🤔 I couldn't generate a response. Please try rephrasing your question.",
+                description=(
+                    "🤔 I couldn't generate a response. Please try rephrasing your question."
+                ),
                 color=discord.Color.orange(),
             )
             await interaction.edit_original_response(embed=no_response_embed)
@@ -487,7 +474,7 @@ class XenonSupportBot(commands.Bot):
         question: str,
         history: list[dict],
         guild_id: int,
-        srv_settings,
+        srv_settings: ServerSettings,
     ) -> None:
         """Handle a follow-up question with conversation history."""
         # Check rate limit
@@ -543,8 +530,8 @@ class XenonSupportBot(commands.Bot):
                     final_response = step.response
                     response_buttons = step.buttons
 
-        except Exception as e:
-            print(f"Agent error: {e}")
+        except Exception:
+            logger.exception("Agent failed while answering a follow-up")
             error_embed = discord.Embed(
                 description="❌ Sorry, I encountered an error processing your request.",
                 color=discord.Color.red(),
@@ -554,7 +541,10 @@ class XenonSupportBot(commands.Bot):
 
         if is_irrelevant:
             irrelevant_embed = discord.Embed(
-                description="🤔 This question doesn't seem to be about Xenon. I can only help with Xenon-related questions.",
+                description=(
+                    "🤔 This question doesn't seem to be about Xenon. "
+                    "I can only help with Xenon-related questions."
+                ),
                 color=discord.Color.greyple(),
             )
             await interaction.edit_original_response(embed=irrelevant_embed)
@@ -579,12 +569,12 @@ class XenonSupportBot(commands.Bot):
 
             # Extract step descriptions for community support
             steps_taken = [
-                step.description for step in steps
-                if step.type == "tool_call" and step.description
+                step.description for step in steps if step.type == "tool_call" and step.description
             ]
 
             # Build updated conversation history
-            new_history = history + [
+            new_history = [
+                *history,
                 {"role": "user", "content": question},
                 {"role": "assistant", "content": final_response},
             ]
@@ -631,7 +621,9 @@ class XenonSupportBot(commands.Bot):
             await interaction.edit_original_response(embed=response_embed, view=view)
         else:
             no_response_embed = discord.Embed(
-                description="🤔 I couldn't generate a response. Please try rephrasing your question.",
+                description=(
+                    "🤔 I couldn't generate a response. Please try rephrasing your question."
+                ),
                 color=discord.Color.orange(),
             )
             await interaction.edit_original_response(embed=no_response_embed)
@@ -650,7 +642,9 @@ support_config_group = app_commands.Group(
 async def config_show(interaction: discord.Interaction):
     """Show current configuration."""
     if not interaction.guild_id:
-        await interaction.response.send_message("❌ This command only works in servers.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ This command only works in servers.", ephemeral=True
+        )
         return
 
     srv_settings = await server_config.get(interaction.guild_id)
@@ -662,10 +656,16 @@ async def config_show(interaction: discord.Interaction):
 
     # Support channel
     if srv_settings.support_channel_id:
-        channel = interaction.guild.get_channel(srv_settings.support_channel_id) if interaction.guild else None
+        channel = (
+            interaction.guild.get_channel(srv_settings.support_channel_id)
+            if interaction.guild
+            else None
+        )
         embed.add_field(
             name="Support Channel",
-            value=channel.mention if channel else f"ID: {srv_settings.support_channel_id} (not found)",
+            value=channel.mention
+            if channel
+            else f"ID: {srv_settings.support_channel_id} (not found)",
             inline=True,
         )
     else:
@@ -683,10 +683,16 @@ async def config_show(interaction: discord.Interaction):
 
     # Community support channel
     if srv_settings.community_support_channel_id:
-        channel = interaction.guild.get_channel(srv_settings.community_support_channel_id) if interaction.guild else None
+        channel = (
+            interaction.guild.get_channel(srv_settings.community_support_channel_id)
+            if interaction.guild
+            else None
+        )
         embed.add_field(
             name="Community Support Channel",
-            value=channel.mention if channel else f"ID: {srv_settings.community_support_channel_id} (not found)",
+            value=channel.mention
+            if channel
+            else f"ID: {srv_settings.community_support_channel_id} (not found)",
             inline=True,
         )
     else:
@@ -698,8 +704,12 @@ async def config_show(interaction: discord.Interaction):
 @app_commands.command(name="scrape", description="Scrape Xenon documentation (admin only)")
 async def scrape_command(interaction: discord.Interaction):
     """Scrape documentation command."""
+    bot = interaction.client
+    if not isinstance(bot, XenonSupportBot):
+        await interaction.response.send_message("❌ Bot is not ready.", ephemeral=True)
+        return
     member = interaction.user if isinstance(interaction.user, discord.Member) else None
-    if not admin_store.is_admin_in_context(interaction.user.id, member):
+    if not bot.admin_store.is_admin_in_context(interaction.user.id, member):
         await interaction.response.send_message(
             "❌ You don't have permission to run this command.",
             ephemeral=True,
@@ -903,7 +913,7 @@ async def stats_command(interaction: discord.Interaction):
     stats = await analytics.get_global_stats()
 
     # Calculate uptime
-    uptime = datetime.utcnow() - bot.start_time
+    uptime = datetime.now(UTC) - bot.start_time
     uptime_str = format_uptime(uptime)
 
     # Get bot info
@@ -920,10 +930,10 @@ async def stats_command(interaction: discord.Interaction):
     embed.add_field(
         name="🤖 Bot",
         value=f"```\n"
-              f"Servers:  {guild_count:,}\n"
-              f"Users:    {user_count:,}\n"
-              f"Uptime:   {uptime_str}\n"
-              f"```",
+        f"Servers:  {guild_count:,}\n"
+        f"Users:    {user_count:,}\n"
+        f"Uptime:   {uptime_str}\n"
+        f"```",
         inline=True,
     )
 
@@ -933,10 +943,10 @@ async def stats_command(interaction: discord.Interaction):
     embed.add_field(
         name="❓ Questions",
         value=f"```\n"
-              f"Total:    {stats['total_questions']:,}\n"
-              f"Today:    {stats['questions_today']:,}\n"
-              f"Week:     {stats['questions_week']:,}\n"
-              f"```",
+        f"Total:    {stats['total_questions']:,}\n"
+        f"Today:    {stats['questions_today']:,}\n"
+        f"Week:     {stats['questions_week']:,}\n"
+        f"```",
         inline=True,
     )
 
@@ -944,10 +954,10 @@ async def stats_command(interaction: discord.Interaction):
     embed.add_field(
         name="✅ Performance",
         value=f"```\n"
-              f"Answered: {stats['total_answered']:,}\n"
-              f"Rate:     {answer_rate:.1f}%\n"
-              f"[{rate_bar}]\n"
-              f"```",
+        f"Answered: {stats['total_answered']:,}\n"
+        f"Rate:     {answer_rate:.1f}%\n"
+        f"[{rate_bar}]\n"
+        f"```",
         inline=True,
     )
 
@@ -955,10 +965,10 @@ async def stats_command(interaction: discord.Interaction):
     embed.add_field(
         name="👥 Usage",
         value=f"```\n"
-              f"Unique Users:   {stats['unique_users']:,}\n"
-              f"Active Servers: {stats['unique_guilds']:,}\n"
-              f"Tool Calls:     {stats['total_tool_calls']:,}\n"
-              f"```",
+        f"Unique Users:   {stats['unique_users']:,}\n"
+        f"Active Servers: {stats['unique_guilds']:,}\n"
+        f"Tool Calls:     {stats['total_tool_calls']:,}\n"
+        f"```",
         inline=False,
     )
 
@@ -1056,7 +1066,3 @@ async def about_command(interaction: discord.Interaction):
     )
 
     await interaction.response.send_message(embed=embed)
-
-
-# Create bot instance
-bot = XenonSupportBot()

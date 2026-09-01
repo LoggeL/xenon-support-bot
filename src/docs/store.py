@@ -7,7 +7,7 @@ from src.database import get_pool
 from src.docs.scraper import DocPage, DocSection
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class DocInfo:
     """Lightweight doc info (no content)."""
 
@@ -23,9 +23,7 @@ class DocStore:
         """Get list of all available docs (titles only, no content)."""
         pool = await get_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT slug, title, url FROM doc_pages ORDER BY title"
-            )
+            rows = await conn.fetch("SELECT slug, title, url FROM doc_pages ORDER BY title")
             return [DocInfo(slug=r["slug"], title=r["title"], url=r["url"]) for r in rows]
 
     async def get_doc_titles_for_prompt(self) -> str:
@@ -68,6 +66,16 @@ class DocStore:
             return None
         return doc.full_text
 
+    async def get_doc_info(self, slug: str) -> DocInfo | None:
+        """Get citation metadata without loading a document body."""
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT slug, title, url FROM doc_pages WHERE slug = $1",
+                slug,
+            )
+        return DocInfo(**dict(row)) if row else None
+
     async def get_all_docs(self) -> list[DocPage]:
         """Get all documents with full content."""
         pool = await get_pool()
@@ -99,25 +107,50 @@ class DocStore:
             return count > 0
 
     async def save_doc(self, doc: DocPage) -> None:
-        """Save a document to the database."""
+        """Atomically save a document and its searchable sections."""
         pool = await get_pool()
-        async with pool.acquire() as conn:
-            sections_json = json.dumps([{"heading": s.heading, "content": s.content} for s in doc.sections])
+        async with pool.acquire() as conn, conn.transaction():
+            sections_json = json.dumps(
+                [
+                    {"heading": section.heading, "content": section.content}
+                    for section in doc.sections
+                ]
+            )
             await conn.execute(
                 """
-                INSERT INTO doc_pages (slug, title, url, sections, scraped_at)
-                VALUES ($1, $2, $3, $4, NOW())
-                ON CONFLICT (slug) DO UPDATE SET
-                    title = $2,
-                    url = $3,
-                    sections = $4,
-                    scraped_at = NOW()
-                """,
+                    INSERT INTO doc_pages (slug, title, url, sections, scraped_at)
+                    VALUES ($1, $2, $3, $4, NOW())
+                    ON CONFLICT (slug) DO UPDATE SET
+                        title = EXCLUDED.title,
+                        url = EXCLUDED.url,
+                        sections = EXCLUDED.sections,
+                        scraped_at = NOW()
+                    """,
                 doc.slug,
                 doc.title,
                 doc.url,
                 sections_json,
             )
+            await conn.execute("DELETE FROM doc_sections WHERE page_slug = $1", doc.slug)
+            if doc.sections:
+                await conn.executemany(
+                    """
+                        INSERT INTO doc_sections (
+                            page_slug, position, title, heading, content, url
+                        ) VALUES ($1, $2, $3, $4, $5, $6)
+                        """,
+                    [
+                        (
+                            doc.slug,
+                            position,
+                            doc.title,
+                            section.heading,
+                            section.content,
+                            doc.url,
+                        )
+                        for position, section in enumerate(doc.sections)
+                    ],
+                )
 
     async def clear_all(self) -> None:
         """Clear all documents from the database."""

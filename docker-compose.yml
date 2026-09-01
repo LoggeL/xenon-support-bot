@@ -1,15 +1,30 @@
 services:
   xenon-support-bot:
     build: .
-    container_name: xenon-support-bot
     restart: unless-stopped
     env_file:
-      - .env
-    volumes:
-      - ./data:/app/data
-    networks:
-      - proxy
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://xenon:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/xenon_support
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-networks:
-  proxy:
-    external: true
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: xenon_support
+      POSTGRES_USER: xenon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xenon -d xenon_support"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

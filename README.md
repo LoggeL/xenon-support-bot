@@ -1,190 +1,99 @@
-# 🤖 Xenon Support Bot
+# Xenon Support Bot
 
-An intelligent Discord support bot for [Xenon](https://xenon.bot) that uses **agentic RAG** (Retrieval-Augmented Generation) to answer questions based on official documentation.
+An AI-assisted Discord support bot grounded in the official [Xenon documentation](https://wiki.xenon.bot). It uses OpenAI's Responses API with `gpt-5.6-luna`, strict function tools, and structured outputs to keep answers fast, inexpensive, and traceable to pages the model actually read.
 
-![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
-![Discord.py](https://img.shields.io/badge/discord.py-2.3+-5865F2?logo=discord&logoColor=white)
-![OpenRouter](https://img.shields.io/badge/OpenRouter-GPT--5.1-green)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+## What it does
 
----
+- Searches and reads official Xenon documentation on demand.
+- Rejects unrelated questions and fails closed when the docs do not establish an answer.
+- Adds citation buttons only for documentation pages actually retrieved during the run.
+- Supports screenshots, follow-up questions, live progress, rate limiting, and community escalation.
+- Stores server configuration, documentation, full-text search data, and analytics in PostgreSQL.
+- Exposes administration, analytics, documentation refresh, stats, and setup commands in Discord.
 
-## ✨ Features
+## Architecture
 
-| Feature | Description |
-|---------|-------------|
-| 🧠 **Agentic RAG** | Uses function calling to search and retrieve docs on-demand |
-| 🎯 **Relevance Filter** | Silently ignores questions unrelated to Xenon |
-| ⚡ **Live Progress** | Shows real-time tool steps as the agent works |
-| 🔍 **Full-Text Search** | Whoosh-powered search across all doc sections |
-| 🖼️ **Image Support** | Analyzes screenshots attached to questions |
-| 💬 **Context Memory** | Remembers the last 5 messages per channel |
-| ⏱️ **Rate Limiting** | Configurable per-user request limits |
-| 📋 **Discord Embeds** | Clean, formatted responses with length handling |
-
----
-
-## 🔄 How It Works
-
-```
-User Question
-     │
-     ▼
-┌─────────────────────────┐
-│  🤔 Check Relevance     │  ← Is this about Xenon?
-└─────────────────────────┘
-     │
-   Yes ──► Continue
-   No  ──► Silent (no response)
-     │
-     ▼
-┌─────────────────────────┐
-│  🔍 Search/Read Docs    │  ← Agent calls tools one-by-one
-└─────────────────────────┘
-     │
-     ▼
-┌─────────────────────────┐
-│  📖 Generate Answer     │  ← Based on retrieved docs only
-└─────────────────────────┘
-     │
-     ▼
-   Discord Embed Response
+```text
+Discord interaction
+      │
+      ▼
+bounded AgentRunner ─── GPT-5.6 Luna / Responses API
+      │                         │
+      ├── search_docs ◄─────────┤
+      └── get_doc ◄─────────────┘
+              │
+              ▼
+        PostgreSQL FTS
 ```
 
-The agent sees a list of available documentation pages but must **call tools** to read content. This ensures answers are grounded in actual documentation.
+The model adapter is behind a small `ModelClient` interface. The agent loop owns tool budgets, continuation items, structured answer validation, and citation allowlisting. PostgreSQL is the canonical document store and search engine, so scraping and retrieval no longer depend on a separate local index.
 
----
+## Quick start with Docker
 
-## 🛠️ Agent Tools
-
-| Tool | Description |
-|------|-------------|
-| `check_relevance` | Determines if the question is about Xenon |
-| `search_docs` | Full-text search across all documentation |
-| `get_doc` | Retrieves full content of a specific doc page |
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Docker & Docker Compose
-- Discord Bot Token → [Create one here](https://discord.com/developers/applications)
-- OpenRouter API Key → [Get one here](https://openrouter.ai)
-
-### Installation
+Requirements: Docker Compose, a Discord bot token, and an OpenAI API key with access to `gpt-5.6-luna`.
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/xenon-support-bot.git
+git clone https://github.com/LoggeL/xenon-support-bot.git
 cd xenon-support-bot
-
-# Configure environment
 cp .env.example .env
-nano .env  # Edit with your credentials
-
-# Deploy
-docker compose up -d
+# Fill in DISCORD_TOKEN, OPENAI_API_KEY, and POSTGRES_PASSWORD.
+docker compose up --build -d
 ```
 
-### Initialize Documentation
+Run `/scrape` once in Discord, then `/setup-support-menu` to publish the support entry point.
 
-In Discord, run `/scrape` (admin only) to fetch the latest Xenon docs.
+## Configuration
 
----
+| Variable | Required | Default | Purpose |
+| --- | --- | --- | --- |
+| `DISCORD_TOKEN` | yes | — | Discord bot token |
+| `OPENAI_API_KEY` | yes | — | OpenAI API key |
+| `DATABASE_URL` | yes | — | PostgreSQL connection URL; Compose supplies its own |
+| `POSTGRES_PASSWORD` | Compose | — | Password for the bundled PostgreSQL container |
+| `OPENAI_MODEL` | no | `gpt-5.6-luna` | Pinned and validated model ID |
+| `OPENAI_REASONING_EFFORT` | no | `medium` | `none`, `low`, `medium`, `high`, `xhigh`, or `max` |
+| `OPENAI_MAX_OUTPUT_TOKENS` | no | `1800` | Per-response output ceiling |
+| `RATE_LIMIT_PER_MINUTE` | no | `5` | Per-user request limit |
+| `ADMIN_USER_IDS` | no | project owner | Comma-separated bot-owner IDs |
+| `LOG_LEVEL` | no | `INFO` | Application log level |
 
-## ⚙️ Configuration
+Secrets are validated at startup and are never written to application logs.
 
-### Required Environment Variables
+## Discord commands
 
-| Variable | Description |
-|----------|-------------|
-| `DISCORD_TOKEN` | Your Discord bot token |
-| `OPENROUTER_API_KEY` | Your OpenRouter API key |
-| `DISCORD_CHANNEL_ID` | Channel ID where bot listens |
-| `ADMIN_USER_IDS` | Comma-separated admin user IDs |
+| Command | Access | Purpose |
+| --- | --- | --- |
+| `/setup-support-menu` | Manage Server | Publish the support menu and configure escalation |
+| `/scrape` | Bot owner or guild admin | Refresh official documentation |
+| `/support-config show` | Manage Server | Show server configuration |
+| `/support-analytics` | Manage Server | Show recent support metrics |
+| `/support-unanswered` | Manage Server | Show unresolved questions |
+| `/stats` | Everyone | Show bot usage and uptime |
+| `/about` | Everyone | Show product information |
 
-### Optional Settings
+## Local development
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENROUTER_MODEL` | `openai/gpt-5.1` | LLM model for responses |
-| `RATE_LIMIT_PER_MINUTE` | `5` | Max requests per user per minute |
-
----
-
-## 💬 Commands
-
-| Command | Description | Access |
-|---------|-------------|--------|
-| `/scrape` | Scrape latest Xenon documentation | Admin only |
-| `/clear` | Clear conversation history for channel | Everyone |
-
----
-
-## 🧑‍💻 Development
+The project uses Python 3.12 and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-# Install dependencies
-pip install -e ".[dev]"
-
-# Run locally
-python -m src.main
-
-# Scrape docs manually
-python -m src.docs.scraper
-
-# Rebuild search index
-python -c "from src.docs.search import doc_search; doc_search.rebuild_index()"
+uv sync --extra dev
+uv run ruff format --check .
+uv run ruff check .
+uv run pyright
+uv run pytest
+uv run python -m src.main
 ```
 
----
+CI runs formatting, linting, type checking, tests, and a package build on every pull request.
 
-## 📁 Project Structure
+## Operational notes
 
-```
-xenon-support-bot/
-├── src/
-│   ├── main.py              # Entry point
-│   ├── config.py            # Environment settings
-│   ├── bot.py               # Discord bot, embeds, rate limiting
-│   ├── agent/
-│   │   ├── client.py        # OpenRouter API client
-│   │   ├── runner.py        # Agentic loop (sequential tools)
-│   │   └── tools.py         # Tool definitions & execution
-│   └── docs/
-│       ├── scraper.py       # Wiki scraper for wiki.xenon.bot
-│       ├── store.py         # Document storage & retrieval
-│       └── search.py        # Whoosh full-text search
-├── data/                    # Scraped docs & search index
-├── Dockerfile
-├── docker-compose.yml
-├── pyproject.toml
-└── .env.example
-```
+- The agent is capped at eight documentation calls across six model turns.
+- Function tools are strict and read-only.
+- Model-proposed source slugs are checked against successful `get_doc` results before links are shown.
+- Schema initialization and the JSONB-to-full-text migration are idempotent.
+- The Docker container runs as an unprivileged user.
 
----
-
-## 🧰 Tech Stack
-
-- **Python 3.11+** — Runtime
-- **discord.py** — Discord API wrapper
-- **OpenRouter** — LLM API with function calling
-- **Whoosh** — Pure Python full-text search
-- **httpx** — Async HTTP client
-- **BeautifulSoup** — HTML parsing for scraper
-- **Pydantic** — Settings and validation
-
----
-
-## 📄 License
+## License
 
 MIT
-
----
-
-## 🙏 Credits
-
-- [Xenon Bot](https://xenon.bot) — The Discord backup bot this supports
-- [OpenRouter](https://openrouter.ai) — LLM API provider

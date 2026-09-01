@@ -1,26 +1,27 @@
 """Scrapes Xenon wiki documentation."""
 
 import asyncio
-import json
+import logging
 import re
-from dataclasses import dataclass, asdict
-from pathlib import Path
+from dataclasses import asdict, dataclass
 
 import httpx
 from bs4 import BeautifulSoup
 
-
 WIKI_BASE = "https://wiki.xenon.bot"
-DEFAULT_DATA_DIR = Path(__file__).parent.parent.parent / "data"
+logger = logging.getLogger(__name__)
 
 
 def decode_cloudflare_email(encoded: str) -> str:
     """Decode Cloudflare-protected email addresses."""
     try:
         key = int(encoded[:2], 16)
-        return ''.join(chr(int(encoded[i:i+2], 16) ^ key) for i in range(2, len(encoded), 2))
+        return "".join(
+            chr(int(encoded[index : index + 2], 16) ^ key) for index in range(2, len(encoded), 2)
+        )
     except (ValueError, IndexError):
         return "[email protected]"
+
 
 DOC_PAGES = [
     ("home", "/en/home"),
@@ -117,23 +118,20 @@ async def scrape_page(client: httpx.AsyncClient, slug: str, path: str) -> DocPag
     try:
         resp = await client.get(url, follow_redirects=True)
         resp.raise_for_status()
-    except httpx.HTTPError as e:
-        print(f"Failed to fetch {url}: {e}")
+    except httpx.HTTPError:
+        logger.exception("Failed to fetch %s", url)
         return None
 
     html = resp.text
 
     # Extract title from page element attribute
     title_match = re.search(r'<page[^>]+title="([^"]+)"', html)
-    if title_match:
-        title = title_match.group(1)
-    else:
-        title = slug.replace("-", " ").title()
+    title = title_match.group(1) if title_match else slug.replace("-", " ").title()
 
     # Extract content HTML from template
     content_html = extract_content_html(html)
     if not content_html:
-        print(f"No content found for {slug}")
+        logger.warning("No content found for %s", slug)
         return DocPage(slug=slug, title=title, url=url, sections=[])
 
     # Parse the content HTML
@@ -142,7 +140,7 @@ async def scrape_page(client: httpx.AsyncClient, slug: str, path: str) -> DocPag
     # Decode Cloudflare-protected emails
     for cf_email in soup.find_all("a", class_="__cf_email__"):
         encoded = cf_email.get("data-cfemail", "")
-        if encoded:
+        if isinstance(encoded, str) and encoded:
             decoded_email = decode_cloudflare_email(encoded)
             cf_email.replace_with(decoded_email)
 
@@ -211,17 +209,28 @@ async def scrape_all_docs() -> list[DocPage]:
     """Scrape all documentation pages and save to database."""
     from src.docs.store import doc_store
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0),
+        headers={"User-Agent": "xenon-support-bot/2.0"},
+    ) as client:
         tasks = [scrape_page(client, slug, path) for slug, path in DOC_PAGES]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    docs = [doc for doc in results if doc is not None]
+    docs: list[DocPage] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            logger.error("Documentation page scrape failed", exc_info=result)
+        elif result is not None:
+            docs.append(result)
+
+    if not docs:
+        raise RuntimeError("No documentation pages could be scraped")
 
     # Save each doc to PostgreSQL
     for doc in docs:
         await doc_store.save_doc(doc)
 
-    print(f"Scraped {len(docs)} documentation pages to database")
+    logger.info("Scraped %d documentation pages", len(docs))
     return docs
 
 

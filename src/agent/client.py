@@ -1,176 +1,161 @@
-"""OpenRouter API client with function calling support."""
+"""Small seam around the OpenAI Responses API."""
 
 import json
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol, cast
 
-import httpx
+from openai import AsyncOpenAI
+from openai.types.shared_params import Reasoning
 
-from src.config import settings
+from src.config import Settings, get_settings
+
+InputItem = dict[str, Any]
+JsonSchema = dict[str, Any]
 
 
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ToolCall:
-    """Represents a tool call from the LLM."""
+    """A validated function request emitted by the model."""
 
-    id: str
+    call_id: str
     name: str
     arguments: dict[str, Any]
 
 
-@dataclass
-class Message:
-    """Chat message."""
-
-    role: str  # "system", "user", "assistant", "tool"
-    content: str | None = None
-    tool_calls: list[ToolCall] = field(default_factory=list)
-    tool_call_id: str | None = None  # For tool responses
-    name: str | None = None  # Tool name for tool responses
-    images: list[str] = field(default_factory=list)  # Base64 images
-
-    def to_api_format(self) -> dict:
-        """Convert to OpenRouter API format."""
-        msg: dict[str, Any] = {"role": self.role}
-
-        if self.role == "user" and self.images:
-            # Multi-modal message with images
-            content_parts: list[dict] = []
-            if self.content:
-                content_parts.append({"type": "text", "text": self.content})
-            for img_b64 in self.images:
-                content_parts.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
-                    }
-                )
-            msg["content"] = content_parts
-        elif self.content is not None:
-            msg["content"] = self.content
-
-        if self.tool_calls:
-            msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments),
-                    },
-                }
-                for tc in self.tool_calls
-            ]
-
-        if self.tool_call_id:
-            msg["role"] = "tool"
-            msg["tool_call_id"] = self.tool_call_id
-            if self.name:
-                msg["name"] = self.name
-
-        return msg
-
-
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Tool:
-    """Tool definition for function calling."""
+    """A strict function tool exposed to the model."""
 
     name: str
     description: str
-    parameters: dict[str, Any]
+    parameters: JsonSchema
 
-    def to_api_format(self) -> dict:
+    def to_api_format(self) -> dict[str, Any]:
         return {
             "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-            },
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+            "strict": True,
         }
 
 
-@dataclass
-class CompletionResponse:
-    """Response from the LLM."""
+@dataclass(frozen=True, slots=True)
+class ModelResponse:
+    """Provider-neutral response consumed by the agent loop."""
 
-    content: str | None
-    tool_calls: list[ToolCall]
-    finish_reason: str
+    output_text: str
+    tool_calls: tuple[ToolCall, ...]
+    output_items: tuple[InputItem, ...]
 
 
-class OpenRouterClient:
-    """Client for OpenRouter API with function calling."""
+class ModelClient(Protocol):
+    """Interface required by the support agent."""
+
+    async def create_response(
+        self,
+        *,
+        instructions: str,
+        input_items: list[InputItem],
+        tools: list[Tool],
+        output_schema: JsonSchema,
+    ) -> ModelResponse: ...
+
+    async def generate_text(self, *, instructions: str, prompt: str) -> str: ...
+
+    async def close(self) -> None: ...
+
+
+class OpenAIResponsesClient:
+    """GPT-5.6 Luna adapter using the native Responses API."""
 
     def __init__(
         self,
-        api_key: str | None = None,
-        model: str | None = None,
-    ):
-        self.api_key = api_key or settings.openrouter_api_key
-        self.model = model or settings.openrouter_model
-        self._client = httpx.AsyncClient(timeout=120.0)
+        config: Settings | None = None,
+        *,
+        client: AsyncOpenAI | None = None,
+    ) -> None:
+        config = config or get_settings()
+        self.model = config.openai_model
+        self.reasoning_effort = config.openai_reasoning_effort
+        self.max_output_tokens = config.openai_max_output_tokens
+        self._client = client or AsyncOpenAI(
+            api_key=config.openai_api_key.get_secret_value(),
+            timeout=config.openai_timeout_seconds,
+            max_retries=2,
+        )
 
-    async def chat(
+    async def create_response(
         self,
-        messages: list[Message],
-        tools: list[Tool] | None = None,
-        temperature: float = 0.3,
-    ) -> CompletionResponse:
-        """Send chat completion request."""
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": [m.to_api_format() for m in messages],
-            "temperature": temperature,
-        }
-
-        if tools:
-            payload["tools"] = [t.to_api_format() for t in tools]
-            payload["tool_choice"] = "auto"
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/xenon-support-bot",
-            "X-Title": "Xenon Support Bot",
-        }
-
-        resp = await self._client.post(
-            OPENROUTER_API_URL,
-            json=payload,
-            headers=headers,
+        *,
+        instructions: str,
+        input_items: list[InputItem],
+        tools: list[Tool],
+        output_schema: JsonSchema,
+    ) -> ModelResponse:
+        """Generate one agent turn and normalize provider output."""
+        reasoning: Reasoning = {"effort": cast(Any, self.reasoning_effort)}
+        response = await self._client.responses.create(
+            model=self.model,
+            instructions=instructions,
+            input=input_items,  # pyright: ignore[reportArgumentType]
+            tools=[tool.to_api_format() for tool in tools],  # pyright: ignore[reportArgumentType]
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            reasoning=reasoning,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "support_answer",
+                    "strict": True,
+                    "schema": output_schema,
+                },
+                "verbosity": "low",
+            },
+            max_output_tokens=self.max_output_tokens,
+            store=False,
+            include=["reasoning.encrypted_content"],
         )
-        resp.raise_for_status()
-        data = resp.json()
 
-        choice = data["choices"][0]
-        message = choice["message"]
-
-        # Parse tool calls if present
+        output_items: list[InputItem] = []
         tool_calls: list[ToolCall] = []
-        if "tool_calls" in message and message["tool_calls"]:
-            for tc in message["tool_calls"]:
-                func = tc["function"]
-                try:
-                    args = json.loads(func["arguments"])
-                except json.JSONDecodeError:
-                    args = {}
-                tool_calls.append(
-                    ToolCall(
-                        id=tc["id"],
-                        name=func["name"],
-                        arguments=args,
-                    )
-                )
 
-        return CompletionResponse(
-            content=message.get("content"),
-            tool_calls=tool_calls,
-            finish_reason=choice.get("finish_reason", "stop"),
+        for item in response.output:
+            output_items.append(item.model_dump(mode="json", exclude_none=True))
+            if item.type != "function_call":
+                continue
+
+            try:
+                arguments = json.loads(item.arguments)
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+
+            tool_calls.append(
+                ToolCall(
+                    call_id=item.call_id,
+                    name=item.name,
+                    arguments=arguments if isinstance(arguments, dict) else {},
+                )
+            )
+
+        return ModelResponse(
+            output_text=response.output_text,
+            tool_calls=tuple(tool_calls),
+            output_items=tuple(output_items),
         )
 
-    async def close(self):
-        await self._client.aclose()
+    async def generate_text(self, *, instructions: str, prompt: str) -> str:
+        """Run a small text-only transformation without exposing agent tools."""
+        response = await self._client.responses.create(
+            model=self.model,
+            instructions=instructions,
+            input=prompt,
+            reasoning={"effort": "low"},
+            text={"verbosity": "low"},
+            max_output_tokens=256,
+            store=False,
+        )
+        return response.output_text.strip()
+
+    async def close(self) -> None:
+        await self._client.close()

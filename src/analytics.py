@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from src.database import get_pool
@@ -94,7 +94,7 @@ class Analytics:
         limit: int = 10,
     ) -> list[QuestionRecord]:
         """Get recent unanswered questions."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         pool = await get_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -124,7 +124,7 @@ class Analytics:
 
     async def get_stats(self, guild_id: int, days: int = 7) -> dict[str, Any]:
         """Get analytics stats for a guild."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         pool = await get_pool()
         async with pool.acquire() as conn:
             # Total questions
@@ -179,26 +179,20 @@ class Analytics:
             total_tool_calls = await conn.fetchval("SELECT COUNT(*) FROM tool_calls")
 
             # Unique users
-            unique_users = await conn.fetchval(
-                "SELECT COUNT(DISTINCT user_id) FROM questions"
-            )
+            unique_users = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM questions")
 
             # Unique guilds
-            unique_guilds = await conn.fetchval(
-                "SELECT COUNT(DISTINCT guild_id) FROM questions"
-            )
+            unique_guilds = await conn.fetchval("SELECT COUNT(DISTINCT guild_id) FROM questions")
 
             # Questions today
-            today = datetime.now(timezone.utc).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
             questions_today = await conn.fetchval(
                 "SELECT COUNT(*) FROM questions WHERE created_at >= $1",
                 today,
             )
 
             # Questions this week
-            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+            week_ago = datetime.now(UTC) - timedelta(days=7)
             questions_week = await conn.fetchval(
                 "SELECT COUNT(*) FROM questions WHERE created_at >= $1",
                 week_ago,

@@ -1,147 +1,103 @@
-"""Agent tools for Xenon support bot."""
+"""Documentation tools available to the support agent."""
 
 from typing import Any
 
 from src.agent.client import Tool
-from src.docs.store import doc_store
 from src.docs.search import doc_search
+from src.docs.store import doc_store
 
-
-# Tool definitions for the LLM
 TOOLS: list[Tool] = [
-    Tool(
-        name="check_relevance",
-        description=(
-            "Check if the user's question is relevant to Xenon bot support. "
-            "Call this FIRST before any other tool. Returns true if the question "
-            "is about Xenon (backups, templates, sync, premium, commands, etc.), "
-            "false otherwise. If false, you should not answer the question."
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "reasoning": {
-                    "type": "string",
-                    "description": "Brief reasoning about why this is or isn't about Xenon",
-                },
-                "is_relevant": {
-                    "type": "boolean",
-                    "description": "True if the question is about Xenon bot, false otherwise",
-                },
-            },
-            "required": ["reasoning", "is_relevant"],
-        },
-    ),
     Tool(
         name="search_docs",
         description=(
-            "Full-text search across all Xenon documentation. "
-            "Use this to find relevant sections when you don't know which doc to look at. "
-            "Returns matching sections with snippets."
+            "Search official Xenon documentation. Use concise keywords and inspect the most "
+            "relevant full page with get_doc before answering."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query (keywords or phrases)",
-                },
+                    "description": "Concise Xenon documentation search query.",
+                    "minLength": 1,
+                    "maxLength": 200,
+                }
             },
             "required": ["query"],
+            "additionalProperties": False,
         },
     ),
     Tool(
         name="get_doc",
-        description=(
-            "Get the full content of a specific documentation page by its slug. "
-            "Use this when you know which doc you need or after search_docs identifies it."
-        ),
+        description="Read one complete official Xenon documentation page by slug.",
         parameters={
             "type": "object",
             "properties": {
                 "slug": {
                     "type": "string",
-                    "description": "The document slug (e.g., 'backups', 'templates', 'faq')",
-                },
+                    "description": "Exact slug returned by search_docs or the manifest.",
+                    "minLength": 1,
+                    "maxLength": 100,
+                }
             },
             "required": ["slug"],
+            "additionalProperties": False,
         },
     ),
 ]
 
 
 async def execute_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Execute a tool and return the result."""
-
-    if name == "check_relevance":
-        # This tool is evaluated by the LLM itself - we just return its decision
-        return {
-            "is_relevant": arguments.get("is_relevant", False),
-            "reasoning": arguments.get("reasoning", ""),
-        }
-
-    elif name == "search_docs":
-        query = arguments.get("query", "")
+    """Execute one allowlisted read-only documentation tool."""
+    if name == "search_docs":
+        query = str(arguments.get("query", "")).strip()
         if not query:
-            return {"error": "No query provided"}
+            return {"error": "A non-empty query is required."}
 
-        results = doc_search.search(query, limit=5)
-        if not results:
-            return {"results": [], "message": "No matching documentation found"}
-
+        results = await doc_search.search(query, limit=5)
         return {
             "results": [
                 {
-                    "slug": r["slug"],
-                    "title": r["title"],
-                    "heading": r["heading"],
-                    "snippet": r["snippet"],
+                    "slug": result.slug,
+                    "title": result.title,
+                    "heading": result.heading,
+                    "snippet": result.snippet,
+                    "url": result.url,
                 }
-                for r in results
+                for result in results
             ]
         }
 
-    elif name == "get_doc":
-        slug = arguments.get("slug", "")
+    if name == "get_doc":
+        slug = str(arguments.get("slug", "")).strip()
         if not slug:
-            return {"error": "No slug provided"}
+            return {"error": "A non-empty slug is required."}
 
-        text = await doc_store.get_doc_text(slug)
-        if not text:
+        document = await doc_store.get_doc(slug)
+        if document is None:
             manifest = await doc_store.get_manifest()
-            available = [d.slug for d in manifest]
             return {
-                "error": f"Document '{slug}' not found",
-                "available_slugs": available,
+                "error": f"Document '{slug}' was not found.",
+                "available_slugs": [item.slug for item in manifest],
             }
 
-        return {"slug": slug, "content": text}
+        return {
+            "slug": document.slug,
+            "title": document.title,
+            "url": document.url,
+            "content": document.full_text,
+        }
 
-    else:
-        return {"error": f"Unknown tool: {name}"}
+    return {"error": f"Unknown tool: {name}"}
 
 
 def get_tool_emoji(name: str) -> str:
-    """Get emoji for a tool to display in Discord."""
-    emojis = {
-        "check_relevance": "🤔",
-        "search_docs": "🔍",
-        "get_doc": "📖",
-    }
-    return emojis.get(name, "🔧")
+    return {"search_docs": "🔍", "get_doc": "📖"}.get(name, "🔧")
 
 
 def get_tool_description(name: str, arguments: dict[str, Any]) -> str:
-    """Get human-readable description of a tool call."""
-    if name == "check_relevance":
-        return "Checking if this question is about Xenon..."
-
-    elif name == "search_docs":
-        query = arguments.get("query", "")
-        return f'Searching docs for "{query}"...'
-
-    elif name == "get_doc":
-        slug = arguments.get("slug", "")
-        return f'Reading "{slug}" documentation...'
-
-    return f"Running {name}..."
+    if name == "search_docs":
+        return f'Searching docs for "{arguments.get("query", "")}"…'
+    if name == "get_doc":
+        return f'Reading "{arguments.get("slug", "")}" documentation…'
+    return f"Running {name}…"

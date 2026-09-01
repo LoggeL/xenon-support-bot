@@ -1,12 +1,12 @@
 """Per-server configuration storage using PostgreSQL."""
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from src.database import get_pool
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class ServerSettings:
     """Configuration for a single server."""
 
@@ -92,12 +92,15 @@ class ServerConfigStore:
 
     async def update(self, guild_id: int, **kwargs) -> ServerSettings:
         """Update specific fields for a server."""
-        server_settings = await self.get(guild_id)
-        for key, value in kwargs.items():
-            if hasattr(server_settings, key):
-                setattr(server_settings, key, value)
-        await self.save(server_settings)
-        return server_settings
+        allowed_fields = set(ServerSettings.__dataclass_fields__) - {"guild_id"}
+        unknown_fields = set(kwargs) - allowed_fields
+        if unknown_fields:
+            raise ValueError(f"Unknown server setting(s): {', '.join(sorted(unknown_fields))}")
+
+        current = await self.get(guild_id)
+        updated = replace(current, **kwargs)
+        await self.save(updated)
+        return updated
 
 
 # Global instance

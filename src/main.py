@@ -1,24 +1,27 @@
-"""Main entry point for the Xenon Support Bot."""
+"""Application entry point."""
 
-import asyncio
-import sys
+import logging
 
-from src.config import settings
-from src.bot import bot
+from pydantic import ValidationError
+
+from src.bot import XenonSupportBot
+from src.config import get_settings
 
 
-def main():
-    """Run the bot."""
-    print("Starting Xenon Support Bot...")
-    print(f"Model: {settings.openrouter_model}")
-
+def main() -> None:
     try:
-        bot.run(settings.discord_token)
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    except Exception as e:
-        print(f"Fatal error: {e}", file=sys.stderr)
-        sys.exit(1)
+        config = get_settings()
+    except ValidationError as error:
+        raise SystemExit(f"Invalid configuration:\n{error}") from error
+
+    logging.basicConfig(
+        level=config.log_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger(__name__).info("Starting with model %s", config.openai_model)
+
+    bot = XenonSupportBot(config)
+    bot.run(config.discord_token.get_secret_value(), log_handler=None)
 
 
 if __name__ == "__main__":

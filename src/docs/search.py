@@ -1,114 +1,117 @@
-"""Full-text search over documentation using Whoosh."""
+"""PostgreSQL full-text search over Xenon documentation."""
 
-from pathlib import Path
+from dataclasses import dataclass
 
-from whoosh import index
-from whoosh.fields import Schema, TEXT, ID, STORED
-from whoosh.qparser import MultifieldParser, OrGroup
-from whoosh.analysis import StemmingAnalyzer
-
-from src.docs.scraper import DEFAULT_DATA_DIR
+from src.database import get_pool
 
 
-# Schema for the search index
-DOC_SCHEMA = Schema(
-    slug=ID(stored=True),
-    title=TEXT(stored=True, analyzer=StemmingAnalyzer()),
-    heading=TEXT(stored=True, analyzer=StemmingAnalyzer()),
-    content=TEXT(stored=True, analyzer=StemmingAnalyzer()),
-    url=STORED(),
-)
+@dataclass(frozen=True, slots=True)
+class SearchResult:
+    slug: str
+    title: str
+    heading: str
+    snippet: str
+    url: str
+    score: float
 
 
 class DocSearch:
-    """Full-text search over Xenon documentation."""
+    """Search adapter backed by the same durable store as scraped documents."""
 
-    def __init__(self, index_dir: Path | None = None):
-        self.index_dir = index_dir or (DEFAULT_DATA_DIR / "index")
-        self._ix: index.Index | None = None
+    async def search(self, query: str, limit: int = 5) -> list[SearchResult]:
+        query = query.strip()
+        if not query:
+            return []
 
-    def _get_or_create_index(self) -> index.Index:
-        """Get existing index or create new one."""
-        if self._ix is not None:
-            return self._ix
+        safe_limit = max(1, min(limit, 10))
+        pool = await get_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                WITH ranked AS (
+                    SELECT
+                        page_slug,
+                        title,
+                        heading,
+                        content,
+                        url,
+                        ts_rank_cd(
+                            to_tsvector(
+                                'english',
+                                coalesce(title, '') || ' ' ||
+                                coalesce(heading, '') || ' ' || content
+                            ),
+                            websearch_to_tsquery('english', $1)
+                        ) AS score
+                    FROM doc_sections
+                    WHERE to_tsvector(
+                        'english',
+                        coalesce(title, '') || ' ' ||
+                        coalesce(heading, '') || ' ' || content
+                    ) @@ websearch_to_tsquery('english', $1)
+                )
+                SELECT page_slug, title, heading, content, url, score
+                FROM ranked
+                ORDER BY score DESC, title, heading
+                LIMIT $2
+                """,
+                query,
+                safe_limit,
+            )
 
-        self.index_dir.mkdir(parents=True, exist_ok=True)
+            if not rows:
+                rows = await connection.fetch(
+                    """
+                    SELECT page_slug, title, heading, content, url, 0.0 AS score
+                    FROM doc_sections
+                    WHERE title ILIKE '%' || $1 || '%'
+                       OR heading ILIKE '%' || $1 || '%'
+                       OR content ILIKE '%' || $1 || '%'
+                    ORDER BY title, heading
+                    LIMIT $2
+                    """,
+                    query,
+                    safe_limit,
+                )
 
-        if index.exists_in(str(self.index_dir)):
-            self._ix = index.open_dir(str(self.index_dir))
-        else:
-            self._ix = index.create_in(str(self.index_dir), DOC_SCHEMA)
-
-        return self._ix
+        return [
+            SearchResult(
+                slug=row["page_slug"],
+                title=row["title"],
+                heading=row["heading"],
+                snippet=_snippet(row["content"]),
+                url=row["url"],
+                score=float(row["score"]),
+            )
+            for row in rows
+        ]
 
     async def rebuild_index(self) -> int:
-        """Rebuild the search index from stored docs in PostgreSQL."""
-        from src.docs.store import doc_store
-
-        self.index_dir.mkdir(parents=True, exist_ok=True)
-
-        # Always create fresh index
-        ix = index.create_in(str(self.index_dir), DOC_SCHEMA)
-        self._ix = ix
-
-        writer = ix.writer()
-        doc_count = 0
-
-        for doc in await doc_store.get_all_docs():
-            for section in doc.sections:
-                writer.add_document(
-                    slug=doc.slug,
-                    title=doc.title,
-                    heading=section.heading,
-                    content=section.content,
-                    url=doc.url,
-                )
-                doc_count += 1
-
-        writer.commit()
-        return doc_count
-
-    def search(self, query: str, limit: int = 5) -> list[dict]:
-        """
-        Search documentation for a query.
-
-        Returns list of matching sections with slug, title, heading, snippet.
-        """
-        ix = self._get_or_create_index()
-
-        parser = MultifieldParser(
-            ["title", "heading", "content"],
-            schema=ix.schema,
-            group=OrGroup,
-        )
-
-        try:
-            parsed_query = parser.parse(query)
-        except Exception:
-            # If query parsing fails, try as simple phrase
-            parsed_query = parser.parse(f'"{query}"')
-
-        results = []
-        with ix.searcher() as searcher:
-            hits = searcher.search(parsed_query, limit=limit)
-
-            for hit in hits:
-                # Create snippet from content
-                content = hit.get("content", "")
-                snippet = content[:300] + "..." if len(content) > 300 else content
-
-                results.append(
-                    {
-                        "slug": hit["slug"],
-                        "title": hit["title"],
-                        "heading": hit.get("heading", ""),
-                        "snippet": snippet,
-                        "score": hit.score,
-                    }
-                )
-
-        return results
+        """Synchronize searchable rows from the canonical JSON document records."""
+        pool = await get_pool()
+        async with pool.acquire() as connection, connection.transaction():
+            await connection.execute("TRUNCATE doc_sections")
+            status = await connection.execute(
+                """
+                INSERT INTO doc_sections (page_slug, position, title, heading, content, url)
+                SELECT
+                    page.slug,
+                    section.ordinality - 1,
+                    page.title,
+                    coalesce(section.value->>'heading', ''),
+                    coalesce(section.value->>'content', ''),
+                    page.url
+                FROM doc_pages AS page
+                CROSS JOIN LATERAL jsonb_array_elements(page.sections)
+                    WITH ORDINALITY AS section(value, ordinality)
+                """
+            )
+        return int(status.rsplit(" ", 1)[-1])
 
 
-# Global instance
+def _snippet(content: str, limit: int = 420) -> str:
+    compact = " ".join(content.split())
+    return compact if len(compact) <= limit else f"{compact[: limit - 1].rstrip()}…"
+
+
 doc_search = DocSearch()
